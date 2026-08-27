@@ -8,8 +8,8 @@
  * - Somente um resultado passado explicitamente para publicarResultado(r)
  *   pode ser gravado no Firebase.
  *
- * Isso impede que placares antigos/locais reapareçam quando o usuário usa
- * "Resultado de outro horário".
+ * Isso impede que placares locais antigos sejam reenviados. A LEITURA, porém,
+ * recupera todo o histórico remoto para manter a sequência entre dispositivos.
  */
 const Sincronizacao = {
   DATABASE_URL: "https://projeto-padroes-default-rtdb.firebaseio.com",
@@ -18,11 +18,8 @@ const Sincronizacao = {
   _timer: null,
   _rodando: false,
   _listeners: new Set(),
-  _chavesConhecidasAoAbrir: new Set(),
   _chavesEntreguesSessao: new Set(),
   _filaEnvio: new Map(),
-  _inicioSessaoMs: 0,
-  _baselineRemotoPronto: false,
 
   configurada() {
     return /^https:\/\/[^\s]+$/.test(String(this.DATABASE_URL || "").trim());
@@ -90,10 +87,6 @@ const Sincronizacao = {
     return [...mapa.values()].sort((a, b) => this._chave(a).localeCompare(this._chave(b)));
   },
 
-  _foiCriadoNestaSessao(r) {
-    const ms = Date.parse(r?.data || "");
-    return Number.isFinite(ms) && this._inicioSessaoMs > 0 && ms >= this._inicioSessaoMs;
-  },
 
   async _get() {
     if (!this.configurada()) return [];
@@ -148,18 +141,6 @@ const Sincronizacao = {
     try {
       const remotoAntes = this._listaUnica(await this._get());
 
-      // Se a primeira leitura na abertura falhou, tudo que for antigo vira
-      // baseline assim que a conexão voltar. Isso não alimenta a fila de envio.
-      if (!this._baselineRemotoPronto) {
-        for (const r of remotoAntes) {
-          if (!this._foiCriadoNestaSessao(r)) {
-            const chave = this._chave(r);
-            if (chave) this._chavesConhecidasAoAbrir.add(chave);
-          }
-        }
-        this._baselineRemotoPronto = true;
-      }
-
       const mapaRemoto = new Map(remotoAntes.map(r => [this._chave(r), r]));
 
       // IMPORTANTE: percorre SOMENTE a fila explícita. Nunca localStorage.
@@ -173,14 +154,13 @@ const Sincronizacao = {
       }
 
       const remotoDepois = this._listaUnica(await this._get());
+      // Entrega todo registro remoto ainda não entregue nesta abertura.
+      // Isso é proposital: se o app abrir offline e a conexão voltar depois,
+      // o histórico antigo do Firebase também reaparece, mantendo a sessão
+      // contínua entre dispositivos. Historico.adicionar() elimina duplicatas.
       const novosParaInterface = remotoDepois.filter(r => {
         const chave = this._chave(r);
-        if (!chave) return false;
-        if (this._chavesConhecidasAoAbrir.has(chave)) return false;
-        if (this._chavesEntreguesSessao.has(chave)) return false;
-        // Se houver timestamp, só aceita registros criados após a abertura.
-        // Registros sem timestamp não são tratados como novos.
-        return this._foiCriadoNestaSessao(r);
+        return Boolean(chave && !this._chavesEntreguesSessao.has(chave));
       });
 
       if (novosParaInterface.length) {
@@ -208,23 +188,13 @@ const Sincronizacao = {
   async iniciar() {
     if (!this.configurada() || this._timer) return false;
 
-    this._inicioSessaoMs = Date.now();
-    this._chavesConhecidasAoAbrir = new Set();
     this._chavesEntreguesSessao = new Set();
     this._filaEnvio = new Map();
-    this._baselineRemotoPronto = false;
 
-    try {
-      const existentes = this._listaUnica(await this._get());
-      for (const r of existentes) {
-        const chave = this._chave(r);
-        if (chave) this._chavesConhecidasAoAbrir.add(chave);
-      }
-      this._baselineRemotoPronto = true;
-    } catch (e) {
-      console.warn("Não foi possível preparar o histórico da sessão:", e);
-    }
-
+    // Primeira tentativa já entrega o histórico remoto inteiro aos listeners.
+    // Se falhar, o intervalo continuará tentando e recuperará tudo quando a
+    // conexão voltar.
+    await this.sincronizarAgora();
     this._timer = setInterval(() => this.sincronizarAgora(), this.INTERVALO_MS);
     return true;
   },

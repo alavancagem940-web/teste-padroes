@@ -50,73 +50,19 @@ const MercadoOver35 = {
   },
 
   /*
-   * Reconstrói a parte do backup com PAUSAS quando for possível, sem olhar
-   * resultados futuros durante o backtest. Para resultados ao-vivo, qualquer
-   * salto maior que 3 minutos cria uma QUEBRA (PAUSA/VAZIO/sessão diferente).
+   * Série contínua. PAUSAS antigas e intervalos sem registro não quebram mais
+   * o histórico; o tamanho desses intervalos é estudado pela AnaliseTemporal.
    */
   _serieComQuebras(resultados) {
     const lista = Array.isArray(resultados) ? resultados : [];
-    const serie = [];
-
-    const backupResultados = lista.filter(r => r?.fonte !== "ao-vivo");
-    const aoVivo = lista.filter(r => r?.fonte === "ao-vivo");
-
-    let usouBackupBruto = false;
-    try {
-      if (typeof Historico !== "undefined" && typeof Historico.obterDadosBrutos === "function" && backupResultados.length) {
-        const bruto = Historico.obterDadosBrutos();
-        const placaresEsperados = backupResultados.map(r => r?.placar).filter(Boolean);
-        const placaresBruto = [];
-        const prefixo = [];
-
-        for (const item of bruto) {
-          if (item === "PAUSA") {
-            prefixo.push("QUEBRA");
-            continue;
-          }
-          if (!this._ehPlacar(item)) continue;
-          const p = typeof item === "string" ? item : item.placar;
-          placaresBruto.push(p);
-          prefixo.push(this._labelBruto(item));
-          if (placaresBruto.length >= placaresEsperados.length) break;
-        }
-
-        const confere = placaresBruto.length === placaresEsperados.length &&
-          placaresBruto.every((p, i) => p === placaresEsperados[i]);
-
-        if (confere) {
-          while (prefixo[0] === "QUEBRA") prefixo.shift();
-          while (prefixo.at(-1) === "QUEBRA") prefixo.pop();
-          serie.push(...prefixo);
-          usouBackupBruto = true;
-        }
-      }
-    } catch (_) {}
-
-    if (!usouBackupBruto) {
-      for (const r of backupResultados) serie.push(this.transformar(r));
-    }
-
-    let anteriorMin = null;
-    for (const r of aoVivo) {
-      const atualMin = this._minutosTemporal(r?._temporal);
-      if (anteriorMin !== null && atualMin !== null && atualMin - anteriorMin > 3) {
-        if (serie.at(-1) !== "QUEBRA") serie.push("QUEBRA");
-      }
-      serie.push(this.transformar(r));
-      anteriorMin = atualMin;
-    }
-
-    while (serie[0] === "QUEBRA") serie.shift();
-    while (serie.at(-1) === "QUEBRA") serie.pop();
-    return serie;
+    return lista.map(r => this.transformar(r));
   },
 
   _corridaAtual(serie) {
     let corrida = 0;
     for (let i = serie.length - 1; i >= 0; i--) {
       const v = serie[i];
-      if (v === "QUEBRA" || v === "MAIS") break;
+      if (v === "MAIS") break;
       if (v === "MENOS") corrida++;
     }
     return corrida;
@@ -136,11 +82,6 @@ const MercadoOver35 = {
     let corrida = 0;
 
     for (const valor of serie) {
-      if (valor === "QUEBRA") {
-        corrida = 0;
-        continue;
-      }
-
       const faixa = this._faixa(corrida);
       if (faixa) {
         faixas[faixa].total++;
@@ -159,7 +100,6 @@ const MercadoOver35 = {
   _confirmacaoSequencia(serie, tamanho = 3) {
     const limpa = [];
     for (let i = serie.length - 1; i >= 0 && limpa.length < tamanho; i--) {
-      if (serie[i] === "QUEBRA") break;
       limpa.unshift(serie[i]);
     }
     if (limpa.length < 2) return { contexto: limpa, total: 0, over: 0, taxa: 0 };
@@ -172,7 +112,6 @@ const MercadoOver35 = {
       }
       if (!ok) continue;
       const prox = serie[i + limpa.length];
-      if (prox === "QUEBRA") continue;
       total++;
       if (prox === "MAIS") over++;
     }

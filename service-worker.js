@@ -1,4 +1,4 @@
-const CACHE = "esportes-virtuais-mobile-v18-metricas-individuais";
+const CACHE = "esportes-virtuais-mobile-v19-temporal-continuo";
 
 const ASSETS = [
   "./",
@@ -6,8 +6,8 @@ const ASSETS = [
   "./manifest.json",
   "./scripts/backup/backup.js",
   "./scripts/dados/armazenamento.js",
-  "./scripts/dados/sincronizacao.js?v=20260826-sessao-persist-v1",
-  "./scripts/historico/historico.js?v=20260826-sessao-persist-v1",
+  "./scripts/dados/sincronizacao.js?v=20260827-temporal-continuo-v1",
+  "./scripts/historico/historico.js?v=20260827-temporal-continuo-v1",
   "./scripts/analise/calculos.js",
   "./scripts/mercados/resultado-1x2.js?v=20260826-teste-v1",
   "./scripts/mercados/ambos-marcam.js?v=20260826-teste-v1",
@@ -16,18 +16,18 @@ const ASSETS = [
   "./scripts/mercados/over-under-1.5.js?v=20260826-teste-v1",
   "./scripts/mercados/over-under-2.5.js?v=20260826-teste-v1",
   "./scripts/mercados/over-under-3.5.js",
-  "./scripts/mercados/over-3.5.js?v=20260827-metricas-individuais-v1",
+  "./scripts/mercados/over-3.5.js?v=20260827-temporal-continuo-v1",
   "./scripts/mercados/placar-exato.js?v=20260826-teste-v1",
   "./scripts/mercados/gols-exatos.js?v=20260826-teste-v1",
   "./scripts/analise/padroes.js?v=20260826-teste-v1",
   "./scripts/analise/relogio-partidas.js",
-  "./scripts/analise/temporal.js?v=20260826-teste-v1",
-  "./scripts/analise/previsoes.js?v=20260826-teste-v1",
-  "./scripts/desempenho/green-red.js?v=20260827-metricas-individuais-v1",
+  "./scripts/analise/temporal.js?v=20260827-temporal-continuo-v1",
+  "./scripts/analise/previsoes.js?v=20260827-temporal-continuo-v1",
+  "./scripts/desempenho/green-red.js?v=20260827-temporal-continuo-v1",
   "./scripts/desempenho/palpites-registrados.js",
-  "./scripts/aprendizado/aprendizado.js?v=20260826-teste-v1",
-  "./scripts/interface/interface.js?v=20260827-metricas-individuais-v1",
-  "./scripts/js/iniciador.js?v=20260826-sessao-persist-v1"
+  "./scripts/aprendizado/aprendizado.js?v=20260827-temporal-continuo-v1",
+  "./scripts/interface/interface.js?v=20260827-temporal-continuo-v1",
+  "./scripts/js/iniciador.js?v=20260827-temporal-continuo-v1"
 ];
 
 self.addEventListener("install", event => {

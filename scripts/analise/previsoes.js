@@ -15,7 +15,8 @@ const Previsoes={
      ou35:MercadoOverUnder35.analisar(resultados,atual),
      over35:MercadoOver35.analisar(resultados,atual)
    };
-   if(typeof AnaliseTemporal!=='undefined') AnaliseTemporal.anexar(resultados,mercados,(typeof RelogioPartidas!=='undefined')?RelogioPartidas.proximaPartida():null);
+   const proximoTemporal = opcoes?.proximoTemporal || ((typeof RelogioPartidas!=='undefined') ? RelogioPartidas.proximaPartida() : null);
+   if(typeof AnaliseTemporal!=='undefined') AnaliseTemporal.anexar(resultados,mercados,proximoTemporal);
    // O histórico inteiro continua sendo usado pelos motores para estudo.
    // A trava afeta somente a liberação do PALPITE na interface: antes de 3
    // resultados novos, nenhum mercado deve chamar entrada.

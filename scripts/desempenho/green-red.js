@@ -103,7 +103,7 @@ const GreenRed = {
     }
 
     const alvo = resultados[indice];
-    const m = Previsoes.gerar(resultados.slice(0, indice)).mercados;
+    const m = Previsoes.gerar(resultados.slice(0, indice), null, {proximoTemporal: resultados[indice]?._temporal || null}).mercados;
     const ativo = k => m[k]?.ativo && m[k]?.palpite;
     const res = { previsoes: {}, valoresPrevistos: {}, reais: this._rotularAvaliacao(alvo) };
 

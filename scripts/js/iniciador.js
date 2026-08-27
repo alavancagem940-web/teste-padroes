@@ -24,7 +24,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     // O BACKUP é exclusivamente base de aprendizado.
     // O histórico atual é reconstruído separadamente a partir dos resultados ao-vivo locais
     // e, quando configurado, do banco compartilhado.
-    const VERSAO_BACKUP = "2026-08-26-BASEVALIDA-FIREBASE-APRENDIZADO-VAZIOS-V1";
+    const VERSAO_BACKUP = "2026-08-27-SESSAO-CONTINUA-TEMPORAL-FIREBASE-V1";
     const versaoLocal = localStorage.getItem("esportes_virtuais_backup_versao");
     const salvo = typeof Armazenamento !== "undefined" ? Armazenamento.obterDados() : [];
 
@@ -35,7 +35,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
     localStorage.setItem("esportes_virtuais_backup_versao", VERSAO_BACKUP);
 
-    // PAUSA não é partida. A base do GREEN/RED deve contar somente placares válidos.
+    // Marcadores PAUSA de backups antigos são ignorados. A base de estudo conta
+    // somente placares válidos; a sessão temporal real será contínua.
     const quantidadeBackupValida = backupAtual.filter(item => {
       const placar = typeof item === "string" ? item : item?.placar;
       return placar !== "PAUSA" && typeof placar === "string" && /^\d+x\d+$/i.test(placar.trim());
@@ -62,13 +63,15 @@ document.addEventListener("DOMContentLoaded", async () => {
       }
     }
 
-    // Tudo que veio do backup + sessões anteriores vira base de aprendizado.
-    // A sessão visual/contagem GREEN-RED começa zerada, sem perder aprendizado.
-    Historico.definirBaseEstudo(Historico.obterQuantidade());
-    localStorage.setItem("esportes_virtuais_base_estudo_qtd", String(Historico.obterQuantidadeBaseEstudo()));
+    // A base fixa continua sendo apenas o BACKUP. Todos os resultados reais com
+    // horário permanecem na sequência contínua, inclusive os recuperados do
+    // Firebase em outro dispositivo. Assim a contagem temporal nunca zera.
+    Historico.definirBaseEstudo(quantidadeBackupValida);
+    if (typeof Historico.persistir === "function") Historico.persistir();
+    localStorage.setItem("esportes_virtuais_base_estudo_qtd", String(quantidadeBackupValida));
 
-    // Banco compartilhado: depois da reconstrução da base, somente NOVOS resultados
-    // recebidos durante esta abertura entram na sessão atual.
+    // Banco compartilhado: novos resultados de qualquer dispositivo entram na
+    // mesma sequência temporal contínua e são persistidos localmente como cache.
     if (typeof Sincronizacao !== "undefined" && Sincronizacao.configurada()) {
       Sincronizacao.observar(lista => {
         Historico.importarResultadosAoVivo(lista, true);

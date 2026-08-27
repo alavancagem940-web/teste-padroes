@@ -23,7 +23,7 @@ const Aprendizado={
     // Isso evita bloquear a abertura do aplicativo quando o histórico passa de centenas de resultados.
     for(let i=inicio;i<fim;i++){
       const avaliacao=GreenRed.avaliarPrevisao(r,i); if(!avaliacao)continue;
-      const mercados=Previsoes.gerar(r.slice(0,i)).mercados;
+      const mercados=Previsoes.gerar(r.slice(0,i), null, {proximoTemporal:r[i]?._temporal||null}).mercados;
       for(const k of chaves){
         const m=mercados[k]; if(!m?.ativo||!m?.palpite||typeof avaliacao[k]!=='boolean')continue;
         const reg={k,green:avaliacao[k],pct:m.palpite.percentual,oc:m.padrao?.ocorrencias?.length||0,tam:m.padrao?.tamanho||0,chave:this._chave(k,m)};
