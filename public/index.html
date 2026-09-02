@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <meta name="theme-color" content="#07100d" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Bilhete Plus" />
+  <title>Bilhete Plus</title>
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="stylesheet" href="/style.css?v=5.6.7" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><div class="bp-logo">BP</div><div><span class="eyebrow">ANÁLISE ESPORTIVA</span><h1>Bilhete Plus</h1></div></div>
+    <div class="status" id="health">verificando fontes…</div>
+  </header>
+
+  <main>
+    <section class="tab-panel active" data-panel="jogos">
+      <div class="page-title"><div><span class="eyebrow">JOGOS</span><h2>Encontre as melhores partidas</h2></div></div>
+      <section class="controls card">
+        <div class="field"><label for="date">Data dos jogos</label><input id="date" type="date" /></div>
+        <div class="field"><label for="league">Competição</label><select id="league">
+          <optgroup label="Grupos">
+            <option value="market-favorites">Mercado dos Favoritos</option>
+            <option value="all-second">Séries B principais</option>
+          </optgroup>
+          <optgroup label="Primeiras divisões">
+            <option value="premier-league">Premier League</option><option value="la-liga">La Liga</option><option value="serie-a">Serie A</option><option value="bundesliga">Bundesliga</option><option value="ligue-1">Ligue 1</option><option value="brasileirao">Brasileirão Série A</option><option value="saudi-pro-league">Saudi Pro League</option>
+          </optgroup>
+          <optgroup label="Segundas divisões">
+            <option value="brasileirao-b">Brasileirão Série B</option><option value="championship">Championship</option><option value="la-liga-2">La Liga 2</option><option value="serie-b-italy">Serie B Italiana</option><option value="bundesliga-2">2. Bundesliga</option><option value="ligue-2">Ligue 2</option>
+          </optgroup>
+        </select></div>
+        <label class="check-card"><input id="autoPlayers" type="checkbox" checked /><span><strong>Jogadores nos automáticos</strong><small>Ativo por padrão: chutes, chutes no gol, defesas, faltas, cartões e gols nos jogos em que houver estatísticas disponíveis. A cota é usada com prioridade para as partidas mais relevantes.</small></span></label>
+        <button id="load" class="primary">Analisar jogos</button>
+      </section>
+      <section id="summary" class="summary"></section>
+      <section id="matches" class="games-list"></section>
+    </section>
+
+    <section class="tab-panel" data-panel="mercados">
+      <div class="page-title"><div><span class="eyebrow">MERCADOS</span><h2>Análise detalhada</h2></div></div>
+      <section class="card market-toolbar">
+        <div class="field"><label for="marketMatch">Partida</label><select id="marketMatch"></select></div>
+        <div class="filter-scroll" id="marketFilters">
+          <button class="filter-chip active" data-filter="todos">Todos</button><button class="filter-chip" data-filter="gols">Gols</button><button class="filter-chip" data-filter="chutes">Chutes</button><button class="filter-chip" data-filter="defesas">Defesas</button><button class="filter-chip" data-filter="cartoes">Cartões</button><button class="filter-chip" data-filter="faltas">Faltas</button><button class="filter-chip" data-filter="escanteios">Escanteios</button><button class="filter-chip" data-filter="jogadores">Jogadores</button>
+        </div>
+      </section>
+      <section id="marketDetail"></section>
+    </section>
+
+    <section class="tab-panel" data-panel="bilhetes">
+      <div class="page-title"><div><span class="eyebrow">BILHETES</span><h2>Monte, escolha e acompanhe</h2></div></div>
+      <div class="subtabs">
+        <button class="subtab active" data-ticket-tab="automaticos">Automáticos</button>
+        <button class="subtab" data-ticket-tab="um-jogo">Apenas um jogo</button>
+        <button class="subtab" data-ticket-tab="montar">Montar meu bilhete</button>
+      </div>
+
+      <section class="ticket-panel active" data-ticket-panel="automaticos">
+        <section class="card ticket-filter-card">
+          <div class="section-title-row"><div><span class="eyebrow">FILTRO DOS AUTOMÁTICOS</span><h3>De onde montar o bilhete?</h3></div><span class="badge">independente da aba Jogos</span></div>
+          <p class="muted">Escolha a competição antes de gerar. Em “Mercado dos Favoritos”, o Bilhete Plus procura clubes fortes e oportunidades em ligas, copas nacionais e supercopas, sem limitar a busca a campeonatos específicos. Champions League, Libertadores e Sul-Americana ficam fora desse filtro. Se escolher uma liga individual, nenhuma partida de outra competição entra nas sugestões.</p>
+          <div class="ticket-filter-controls">
+            <div class="field"><label for="ticketDate">Data dos bilhetes</label><input id="ticketDate" type="date" /></div>
+            <div class="field"><label for="ticketLeague">Liga / grupo</label><select id="ticketLeague">
+              <optgroup label="Grupos">
+                <option value="market-favorites">Mercado dos Favoritos</option>
+                <option value="all-second">Séries B principais</option>
+              </optgroup>
+              <optgroup label="Primeiras divisões">
+                <option value="premier-league">Premier League</option><option value="la-liga">La Liga</option><option value="serie-a">Serie A</option><option value="bundesliga">Bundesliga</option><option value="ligue-1">Ligue 1</option><option value="brasileirao">Brasileirão Série A</option><option value="saudi-pro-league">Saudi Pro League</option>
+              </optgroup>
+              <optgroup label="Segundas divisões">
+                <option value="brasileirao-b">Brasileirão Série B</option><option value="championship">Championship</option><option value="la-liga-2">La Liga 2</option><option value="serie-b-italy">Serie B Italiana</option><option value="bundesliga-2">2. Bundesliga</option><option value="ligue-2">Ligue 2</option>
+              </optgroup>
+            </select></div>
+            <label class="check-card"><input id="ticketAutoPlayers" type="checkbox" checked /><span><strong>Mercados de jogadores</strong><small>Inclui chutes, chutes no gol, defesas, faltas, cartões e gols quando houver dados.</small></span></label>
+            <button id="generateAutomaticTickets" class="primary">Gerar sugestões</button>
+          </div>
+          <div id="ticketFilterSummary" class="summary compact-summary"></div>
+        </section>
+        <div id="tickets"></div>
+      </section>
+
+      <section class="ticket-panel" data-ticket-panel="um-jogo">
+        <section class="card ticket-filter-card">
+          <div class="section-title-row"><div><span class="eyebrow">APENAS UM JOGO</span><h3>Vários bilhetes para uma partida</h3></div><span class="badge">somente mercados deste jogo</span></div>
+          <p class="muted">Escolha uma partida e o Bilhete Plus monta opções dos cinco perfis usando somente mercados compatíveis desse jogo. Pode combinar resultado, gols, chutes, cartões, faltas, defesas e mercados de jogadores quando houver dados.</p>
+          <div class="ticket-filter-controls">
+            <div class="field"><label for="singleTicketDate">Data</label><input id="singleTicketDate" type="date" /></div>
+            <div class="field"><label for="singleTicketLeague">Liga / grupo</label><select id="singleTicketLeague">
+              <optgroup label="Grupos">
+                <option value="market-favorites">Mercado dos Favoritos</option>
+                <option value="all-second">Séries B principais</option>
+              </optgroup>
+              <optgroup label="Primeiras divisões">
+                <option value="premier-league">Premier League</option><option value="la-liga">La Liga</option><option value="serie-a">Serie A</option><option value="bundesliga">Bundesliga</option><option value="ligue-1">Ligue 1</option><option value="brasileirao">Brasileirão Série A</option><option value="saudi-pro-league">Saudi Pro League</option>
+              </optgroup>
+              <optgroup label="Segundas divisões">
+                <option value="brasileirao-b">Brasileirão Série B</option><option value="championship">Championship</option><option value="la-liga-2">La Liga 2</option><option value="serie-b-italy">Serie B Italiana</option><option value="bundesliga-2">2. Bundesliga</option><option value="ligue-2">Ligue 2</option>
+              </optgroup>
+            </select></div>
+            <button id="loadSingleMatches" class="secondary">Buscar partidas</button>
+            <div class="field"><label for="singleTicketMatch">Partida</label><select id="singleTicketMatch"><option value="">Busque as partidas primeiro</option></select></div>
+            <label class="check-card"><input id="singleTicketPlayers" type="checkbox" checked /><span><strong>Mercados de jogadores</strong><small>O sistema tenta incluir props de jogadores quando houver estatísticas suficientes.</small></span></label>
+            <button id="generateSingleTickets" class="primary">Criar bilhetes desta partida</button>
+          </div>
+          <div id="singleTicketSummary" class="summary compact-summary"><span class="pill">aguardando partida</span></div>
+        </section>
+        <div id="singleTickets"></div>
+      </section>
+
+      <section class="ticket-panel" data-ticket-panel="montar">
+        <section class="card custom-builder">
+          <div class="section-title-row"><div><span class="eyebrow">PERSONALIZADO</span><h3>Montar meu bilhete</h3></div><span class="badge" id="customCount">0 seleções</span></div>
+          <div class="builder-pick">
+            <div class="field"><label for="builderMatch">Jogo</label><select id="builderMatch"></select></div>
+            <div class="field"><label for="builderMarket">Mercado</label><select id="builderMarket"></select></div>
+            <button id="builderAdd" class="secondary">+ Adicionar seleção</button>
+          </div>
+          <div id="customLegs" class="custom-legs"></div>
+          <div class="field house-odd"><label for="customHouseOdd">Odd total da casa (opcional)</label><input id="customHouseOdd" type="number" min="1.01" step="0.01" inputmode="decimal" placeholder="Ex.: 2.40" /></div>
+          <div id="customEvaluation"></div>
+          <div class="two-actions"><button id="clearCustom" class="ghost danger">Limpar</button><button id="saveCustom" class="primary">Salvar bilhete</button></div>
+        </section>
+      </section>
+
+    </section>
+
+    <section class="tab-panel" data-panel="live">
+      <div class="page-title"><div><span class="eyebrow">AO VIVO</span><h2>Meus bilhetes e acompanhamento</h2></div><span class="badge" id="liveBadge">parado</span></div>
+      <section class="card live-saved-block">
+        <div class="section-title-row"><div><span class="eyebrow">MEUS BILHETES</span><h3>Escolha o que acompanhar</h3></div><span class="badge">salvos neste aparelho</span></div>
+        <section id="savedTickets"></section>
+      </section>
+      <section class="card live">
+        <p class="muted live-copy">O Bilhete Plus acompanha o bilhete ao vivo. Com API-Football ativa, mostra também chutes, defesas, cartões, faltas, escanteios e jogadores; se ela falhar, usa placar alternativo quando disponível.</p>
+        <div class="live-toolbar"><div class="field"><label for="liveDate">Data</label><input id="liveDate" type="date" /></div><button id="loadLiveFixtures" class="secondary">Buscar partidas</button></div>
+        <div id="liveSourceMessage" class="micro"></div>
+        <details class="manual-live-builder"><summary>Adicionar seleção manual ao acompanhamento</summary>
+          <div class="builder">
+            <div class="field wide"><label for="liveFixture">Partida</label><select id="liveFixture"></select></div>
+            <div class="field wide"><label for="liveMarket">Mercado</label><select id="liveMarket">
+              <option value="home_win">Casa vence</option><option value="draw">Empate</option><option value="away_win">Fora vence</option><option value="double_chance_1x">Dupla chance: 1X</option><option value="double_chance_12">Dupla chance: 12</option><option value="double_chance_x2">Dupla chance: X2</option><option value="goals_over">Mais de gols</option><option value="goals_under">Menos de gols</option><option value="btts_yes">Ambas marcam: Sim</option><option value="btts_no">Ambas marcam: Não</option><option value="team_goals">Gols do time</option><option value="team_corners">Escanteios do time</option><option value="team_cards">Cartões do time</option><option value="team_shots">Chutes do time</option><option value="team_sot">Chutes no gol do time</option><option value="team_fouls">Faltas do time</option><option value="team_saves">Defesas do goleiro/time</option><option value="player_shots">Chutes do jogador</option><option value="player_sot">Chutes no gol do jogador</option><option value="player_fouls">Faltas cometidas pelo jogador</option><option value="player_fouls_drawn">Faltas sofridas pelo jogador</option><option value="player_card">Jogador receber cartão</option><option value="player_saves">Defesas do goleiro</option><option value="player_goals">Gols do jogador</option>
+            </select></div>
+            <div class="field" id="sideField"><label for="liveSide">Time</label><select id="liveSide"><option value="home">Casa</option><option value="away">Fora</option></select></div>
+            <div class="field" id="playerField"><label for="livePlayer">Jogador</label><input id="livePlayer" placeholder="Ex.: Haaland" autocomplete="off" /></div>
+            <div class="field" id="targetField"><label for="liveTarget">Mínimo / linha</label><input id="liveTarget" inputmode="decimal" type="number" min="0" step="0.5" value="1" /></div>
+            <div class="field"><label for="liveOdd">Odd real (opcional)</label><input id="liveOdd" inputmode="decimal" type="number" min="1.01" step="0.01" placeholder="1.85" /></div>
+            <button id="addLiveLeg" class="primary">+ Adicionar</button>
+          </div>
+        </details>
+        <div id="liveTicketSummary" class="live-summary"></div>
+        <div id="liveTicket" class="live-ticket"></div>
+        <div class="live-actions"><button id="refreshLive" class="secondary">Atualizar agora</button><button id="toggleLive" class="primary">▶ Acompanhar automático</button><button id="clearLive" class="ghost danger">Limpar</button></div>
+        <div id="liveUpdated" class="micro"></div>
+      </section>
+    </section>
+
+    <section class="tab-panel" data-panel="compare">
+      <div class="page-title"><div><span class="eyebrow">COMPARAR ODDS</span><h2>Qual casa está pagando melhor?</h2></div></div>
+      <section class="card manual">
+        <p class="muted">Escolha um mercado analisado pelo Bilhete Plus e informe a odd de duas casas. O app compara preço, probabilidade implícita e EV com a odd justa do modelo.</p>
+        <div class="compare-base">
+          <div class="field"><label for="manualMatch">Jogo</label><select id="manualMatch"></select></div>
+          <div class="field"><label for="manualMarket">Mercado</label><select id="manualMarket"></select></div>
+        </div>
+        <div class="book-grid">
+          <div class="book-card"><span class="eyebrow">CASA 1</span><div class="field"><label for="houseAName">Nome da casa</label><input id="houseAName" type="text" maxlength="32" placeholder="Ex.: Betano" /></div><div class="field"><label for="houseAOdd">Odd</label><input id="houseAOdd" inputmode="decimal" type="number" min="1.01" step="0.01" placeholder="1.85" /></div></div>
+          <div class="book-card"><span class="eyebrow">CASA 2</span><div class="field"><label for="houseBName">Nome da casa</label><input id="houseBName" type="text" maxlength="32" placeholder="Ex.: Bet365" /></div><div class="field"><label for="houseBOdd">Odd</label><input id="houseBOdd" inputmode="decimal" type="number" min="1.01" step="0.01" placeholder="1.92" /></div></div>
+        </div>
+        <div class="two-actions"><button id="calcManual" class="primary">Comparar odds</button><button id="saveComparison" class="secondary">Salvar comparação</button></div>
+        <div id="manualResult"></div>
+        <div id="comparisonHistory" class="comparison-history"></div>
+      </section>
+    </section>
+  </main>
+
+  <footer>Probabilidades e odds justas são estimativas. O aplicativo não executa apostas nem garante resultados.</footer>
+  <nav class="bottom-nav" aria-label="Navegação principal">
+    <button class="nav-btn active" data-tab="jogos"><span>⚽</span>Jogos</button><button class="nav-btn" data-tab="mercados"><span>▥</span>Mercados</button><button class="nav-btn" data-tab="bilhetes"><span>🎟</span>Bilhetes</button><button class="nav-btn" data-tab="live"><span>●</span>Ao vivo</button><button class="nav-btn" data-tab="compare"><span>↔</span>Comparar odds</button>
+  </nav>
+  <script src="/app.js?v=5.6.7"></script>
+</body>
+</html>
