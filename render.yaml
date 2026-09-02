@@ -1,32 +1,8 @@
-services:
-  - type: web
-    name: bilhetes-futebol-mobile-live
-    runtime: node
-    plan: free
-    buildCommand: ""
-    startCommand: npm start
-    envVars:
-      - key: NODE_VERSION
-        value: 20
-      - key: ODDS_API_KEY
-        sync: false
-      - key: API_FOOTBALL_KEY
-        sync: false
-      - key: FOOTBALL_DATA_TOKEN
-        sync: false
-      - key: CACHE_TTL_SECONDS
-        value: 300
-      - key: FIXTURES_CACHE_SECONDS
-        value: 300
-      - key: LIVE_REFRESH_SECONDS
-        value: 90
-      - key: LIVE_PLAYER_REFRESH_SECONDS
-        value: 180
-      - key: PLAYER_STATS_CACHE_SECONDS
-        value: 21600
-      - key: AUTO_PLAYER_MATCH_LIMIT
-        value: 4
-      - key: ODDS_REGIONS
-        value: eu,uk
-      - key: ODDS_MARKETS
-        value: h2h,totals
+Bilhete Plus v5.6.6 — Apenas um jogo + Meus bilhetes no Ao Vivo + jogadores nos automáticos
+
+1. Substitua no GitHub os arquivos pelo conteúdo desta pasta.
+2. Não envie .env nem node_modules.
+3. package.json, server.js e render.yaml devem ficar na raiz do repositório.
+4. Faça Commit changes.
+5. Aguarde o Render ficar Deployed.
+6. Feche e abra novamente o PWA no iPhone para carregar o cache v5.6.6.
