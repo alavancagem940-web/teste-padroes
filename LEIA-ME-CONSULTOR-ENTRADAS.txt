@@ -1,0 +1,45 @@
+CONSULTOR DE ENTRADAS — ALTERAÇÃO ISOLADA
+==========================================
+
+O que foi adicionado
+--------------------
+Foi criado o arquivo:
+  scripts/estrategia/consultor-entradas.js
+
+Ele somente LÊ as previsões e o histórico já existentes e exibe um painel chamado
+"Consultor de Entradas". Nenhum arquivo de mercado/especialista foi alterado.
+
+Regras atuais do consultor
+--------------------------
+- Não usa 1X2.
+- Não usa O/U 0.5.
+- Procura 2 mercados principais pelo valor estimado (EV), com R$1,00 em cada.
+- Exige EV estimado mínimo de +8%.
+- Exige pelo menos 40 casos históricos comparáveis.
+- Usa uma 3ª entrada de R$0,50, preferindo Under 3.5.
+- Após qualquer RED da recomendação, manda PULAR o jogo seguinte.
+- Se não houver 2 mercados principais aprovados, mostra AGUARDAR.
+- O modelo é construído de forma assíncrona e salvo no armazenamento local para
+  as próximas aberturas serem mais rápidas.
+
+Odds de referência usadas no consultor
+---------------------------------------
+Ambos SIM 2.30 / NÃO 1.60
+O1.5 1.55 / U1.5 2.45
+O2.5 2.80 / U2.5 1.44
+U3.5 1.12
+O3.5 6.00
+
+Importante: essas odds são referências dos testes. O painel mostra "Odd ref.".
+Se as odds reais mudarem muito, a avaliação de valor também muda.
+
+Arquivos existentes modificados apenas para integração visual
+---------------------------------------------------------------
+- index.html: carrega o novo módulo.
+- scripts/interface/interface.js: adiciona o espaço visual do painel e chama o
+  consultor no fim da atualização da tela.
+- service-worker.js: inclui o novo arquivo no cache do PWA.
+
+Todos os arquivos em scripts/mercados/, Previsoes, GreenRed, Aprendizado,
+Historico, armazenamento, sincronização e backup permanecem com o conteúdo
+original do ZIP recebido.

@@ -1,0 +1,28 @@
+CORRECAO DE ABERTURA E MEMORIA PERMANENTE
+Versao: 01/09/2026
+
+O QUE FOI CORRIGIDO
+
+1. O painel aparece antes de qualquer consulta ao Firebase.
+2. A tela recebe somente os 10 resultados reais mais recentes.
+3. Cada resultado novo continua sendo registrado jogo a jogo, imediatamente.
+4. O site nao baixa mais o historico inteiro na abertura.
+5. Os 847 placares antigos e 170 situacoes aprendidas foram consolidados em
+   scripts/aprendizado/memoria-consolidada.js.
+6. Cada resultado novo atualiza a memoria dos mercados. Essa memoria fica
+   guardada no navegador e tambem no Firebase, separada dos resultados.
+7. Se o Firebase estiver lento ou indisponivel, o painel e os mercados ainda
+   abrem usando a memoria embutida/local.
+
+COMO PUBLICAR
+
+Envie TODOS os arquivos e pastas desta versao para o site, substituindo os
+antigos. Depois abra a pagina e pressione Ctrl + F5 uma vez para remover o
+cache antigo do navegador.
+
+IMPORTANTE
+
+O arquivo scripts/backup/backup.js foi mantido apenas como fonte historica e
+para permitir regenerar a memoria no futuro. Ele nao e carregado pela pagina,
+nao participa da abertura e nao e consultado pelos mercados durante o uso.
+
