@@ -1,0 +1,16 @@
+{
+  "name": "bilhete-plus",
+  "version": "5.7.3",
+  "private": true,
+  "description": "Bilhete Plus v5.7.3: carregamento rápido, catálogo ampliado de mercados e mercados de jogadores com fallbacks públicos.",
+  "type": "module",
+  "scripts": {
+    "start": "node launcher.js",
+    "dev": "node --watch launcher.js",
+    "test": "node tests.js",
+    "test:teste": "node teste/tests.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

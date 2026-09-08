@@ -1,0 +1,10 @@
+{
+  "name": "Bilhete Plus",
+  "short_name": "Bilhete Plus",
+  "description": "Análise de futebol, odds justas, mercados e acompanhamento de bilhetes ao vivo.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#07100d",
+  "theme_color": "#09110f",
+  "lang": "pt-BR"
+}
