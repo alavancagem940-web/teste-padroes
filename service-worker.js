@@ -1,34 +1,40 @@
-const CACHE = "esportes-virtuais-mobile-v21-memoria-permanente";
+const CACHE = "esportes-virtuais-mobile-v20-nucleo";
+const CACHE_ESCUDOS = "vai-na-fe-escudos-v1";
 
 const ASSETS = [
   "./",
   "./index.html",
   "./manifest.json",
-  "./scripts/aprendizado/memoria-consolidada.js?v=20260901-memoria-v1",
-  "./scripts/dados/armazenamento.js",
-  "./scripts/dados/sincronizacao.js?v=20260901-memoria-v1",
-  "./scripts/historico/historico.js?v=20260901-memoria-v1",
-  "./scripts/analise/calculos.js",
-  "./scripts/mercados/resultado-1x2.js?v=20260826-teste-v1",
-  "./scripts/mercados/ambos-marcam.js?v=20260826-teste-v1",
-  "./scripts/mercados/over-under-0.5.js",
-  "./scripts/mercados/under-0.5.js?v=20260827-ou05-foco-under-v1",
-  "./scripts/mercados/over-under-1.5.js?v=20260826-teste-v1",
-  "./scripts/mercados/over-under-2.5.js?v=20260826-teste-v1",
-  "./scripts/mercados/over-under-3.5.js",
-  "./scripts/mercados/over-3.5.js?v=20260827-temporal-continuo-v1",
-  "./scripts/mercados/placar-exato.js?v=20260826-teste-v1",
-  "./scripts/mercados/gols-exatos.js?v=20260826-teste-v1",
-  "./scripts/analise/padroes.js?v=20260826-teste-v1",
-  "./scripts/analise/relogio-partidas.js",
-  "./scripts/analise/temporal.js?v=20260827-temporal-continuo-v1",
-  "./scripts/analise/previsoes.js?v=20260827-temporal-continuo-v1",
-  "./scripts/desempenho/green-red.js?v=20260827-temporal-continuo-v1",
-  "./scripts/desempenho/palpites-registrados.js",
-  "./scripts/aprendizado/aprendizado.js?v=20260901-memoria-v1",
-  "./scripts/estrategia/consultor-entradas.js?v=20260828-consultor-v1",
-  "./scripts/interface/interface.js?v=20260901-memoria-v1",
-  "./scripts/js/iniciador.js?v=20260901-memoria-v1"
+  "./escudos-cache.js?v=20260909-nucleo-v20",
+  "./scripts/aprendizado/memoria-consolidada.js?v=20260909-nucleo-v20",
+  "./scripts/dados/armazenamento.js?v=20260909-nucleo-v20",
+  "./scripts/dados/sincronizacao.js?v=20260909-nucleo-v20",
+  "./scripts/historico/historico.js?v=20260909-nucleo-v20",
+  "./scripts/analise/calculos.js?v=20260909-nucleo-v20",
+  "./scripts/mercados/resultado-1x2.js?v=20260909-nucleo-v20",
+  "./scripts/mercados/ambos-marcam.js?v=20260909-nucleo-v20",
+  "./scripts/mercados/over-under-0.5.js?v=20260909-nucleo-v20",
+  "./scripts/mercados/under-0.5.js?v=20260909-nucleo-v20",
+  "./scripts/mercados/over-under-1.5.js?v=20260909-nucleo-v20",
+  "./scripts/mercados/over-under-2.5.js?v=20260909-nucleo-v20",
+  "./scripts/mercados/over-under-3.5.js?v=20260909-nucleo-v20",
+  "./scripts/mercados/over-3.5.js?v=20260909-nucleo-v20",
+  "./scripts/mercados/placar-exato.js?v=20260909-nucleo-v20",
+  "./scripts/mercados/gols-exatos.js?v=20260909-nucleo-v20",
+  "./scripts/analise/padroes.js?v=20260909-nucleo-v20",
+  "./scripts/analise/relogio-partidas.js?v=20260909-nucleo-v20",
+  "./scripts/analise/temporal.js?v=20260909-nucleo-v20",
+  "./scripts/analise/previsoes.js?v=20260909-nucleo-v20",
+  "./scripts/desempenho/green-red.js?v=20260909-nucleo-v20",
+  "./scripts/aprendizado/aprendizado.js?v=20260909-nucleo-v20",
+  "./scripts/estrategia/consultor-entradas.js?v=20260909-nucleo-v20",
+  "./scripts/desempenho/palpites-registrados.js?v=20260909-nucleo-v20",
+  "./scripts/interface/interface.js?v=20260909-nucleo-v20",
+  "./scripts/interface/interface-moderna.js?v=20260909-nucleo-v20",
+  "./scripts/dados/firebase-proximas-partidas.js?v=20260909-nucleo-v20",
+  "./scripts/analise/analise-contextual-times.js?v=20260909-nucleo-v20",
+  "./scripts/interface/interface-entradas.js?v=20260909-nucleo-v20",
+  "./scripts/js/iniciador.js?v=20260909-nucleo-v20"
 ];
 
 self.addEventListener("install", event => {
@@ -39,7 +45,7 @@ self.addEventListener("install", event => {
 self.addEventListener("activate", event => {
   event.waitUntil(
     caches.keys().then(keys =>
-      Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k)))
+      Promise.all(keys.filter(k => k !== CACHE && k !== CACHE_ESCUDOS).map(k => caches.delete(k)))
     ).then(() => self.clients.claim())
   );
 });
@@ -48,6 +54,18 @@ self.addEventListener("fetch", event => {
   if (event.request.method !== "GET") return;
 
   const url = new URL(event.request.url);
+
+  // Escudos salvos dinamicamente pelo núcleo.
+  if (/\/escudos\/cache\/\d+\.png$/i.test(url.pathname)) {
+    event.respondWith((async () => {
+      const cache = await caches.open(CACHE_ESCUDOS);
+      const salvo = await cache.match(event.request, { ignoreSearch: true });
+      if (salvo) return salvo;
+      return new Response("", { status: 404, statusText: "Escudo ainda não salvo" });
+    })());
+    return;
+  }
+
   const ehArquivoAtualizavel =
     event.request.mode === "navigate" ||
     url.pathname.endsWith("/index.html") ||
@@ -68,7 +86,5 @@ self.addEventListener("fetch", event => {
     return;
   }
 
-  event.respondWith(
-    caches.match(event.request).then(cached => cached || fetch(event.request))
-  );
+  event.respondWith(caches.match(event.request).then(cached => cached || fetch(event.request)));
 });

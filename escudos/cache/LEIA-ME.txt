@@ -1,0 +1,9 @@
+ESCUDOS VISTOS - CACHE DO NAVEGADOR
+
+Este diretório representa o endereço virtual usado pelo modo teste:
+./escudos/cache/<id>.png
+
+Como o site é estático, o navegador não consegue criar PNGs novos fisicamente
+no GitHub. Os escudos vistos são persistidos no Cache Storage exclusivo
+"vai-na-fe-escudos-v1" e servidos por esse caminho pelo service worker.
+Os PNGs que já vêm no projeto continuam em ../

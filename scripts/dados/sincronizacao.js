@@ -10,8 +10,10 @@
 const Sincronizacao = {
   DATABASE_URL: "https://projeto-padroes-default-rtdb.firebaseio.com",
   CAMINHO: "historico_compartilhado",
-  CAMINHO_MEMORIA: "memoria_mercados_v1",
+  CAMINHO_MEMORIA: "memoria_mercados_v3_base_limpa_h2h10",
+  CAMINHOS_MEMORIA_ANTIGA: ["memoria_mercados_v1", "memoria_mercados_v2_base_zerada"],
   LIMITE_RESULTADOS: 10,
+  LIMITE_BASE_APRENDIZADO: 500,
   INTERVALO_MS: 2000,
   TIMEOUT_MS: 4500,
   _timer: null,
@@ -35,7 +37,7 @@ const Sincronizacao = {
   },
 
   _urlRecentes(limite = this.LIMITE_RESULTADOS) {
-    const n = Math.max(1, Math.min(50, Number(limite) || this.LIMITE_RESULTADOS));
+    const n = Math.max(1, Math.min(1000, Number(limite) || this.LIMITE_RESULTADOS));
     return `${this._url()}?orderBy=%22%24key%22&limitToLast=${n}`;
   },
 
@@ -65,6 +67,32 @@ const Sincronizacao = {
     if (!m) return null;
     const casa = Number(m[1]), fora = Number(m[2]);
     if (!Number.isFinite(casa) || !Number.isFinite(fora)) return null;
+
+    // A IA Coletora nova pode enviar mandante/visitante junto do resultado.
+    // A versão anterior do site descartava esses campos aqui, então a aba
+    // "Últimas entradas" recebia o placar, mas perdia os nomes dos times.
+    const texto = (valor) => {
+      if (valor === undefined || valor === null) return "";
+      if (typeof valor === "object") return String(valor.nome ?? valor.name ?? valor.time ?? "").trim();
+      return String(valor).trim();
+    };
+    const primeiro = (...valores) => {
+      for (const v of valores) {
+        const t = texto(v);
+        if (t) return t;
+      }
+      return "";
+    };
+    const mandante = primeiro(r.mandante, r.casa, r.home, r.timeCasa, r.homeTeam, r.equipeCasa, r.teams?.home);
+    const visitante = primeiro(r.visitante, r.fora, r.away, r.timeFora, r.awayTeam, r.equipeFora, r.teams?.away);
+    const escudoMandante = primeiro(r.escudoMandante, r.escudoCasa, r.homeLogo, r.logoHome, r.logoCasa, r.mandante?.logo, r.home?.logo, r.teams?.home?.logo);
+    const escudoVisitante = primeiro(r.escudoVisitante, r.escudoFora, r.awayLogo, r.logoAway, r.logoFora, r.visitante?.logo, r.away?.logo, r.teams?.away?.logo);
+    const liga = primeiro(r.liga, r.competicao, r.campeonato, r.league, r.competition);
+
+    // BASE LIMPA: resultado sem os DOIS times nao entra no historico,
+    // nao treina mercado e nao participa de confronto direto.
+    if (!mandante || !visitante) return null;
+
     return {
       id: this._idFirebase(r),
       placar: `${casa}x${fora}`,
@@ -80,20 +108,27 @@ const Sincronizacao = {
         slot3: r._temporal.slot3,
         timeZone: r._temporal.timeZone || "Europe/London"
       },
-      fonte: "ao-vivo"
+      fonte: "ao-vivo",
+      ...(mandante ? { mandante } : {}),
+      ...(visitante ? { visitante } : {}),
+      ...(escudoMandante ? { escudoMandante } : {}),
+      ...(escudoVisitante ? { escudoVisitante } : {}),
+      ...(liga ? { liga } : {}),
+      timesConfirmados: Boolean(mandante && visitante)
     };
   },
 
-  _listaUnica(lista) {
+  _listaUnica(lista, limite = this.LIMITE_RESULTADOS) {
     const mapa = new Map();
     for (const bruto of (lista || [])) {
       const r = this._normalizar(bruto);
       const chave = this._chave(r);
       if (r && chave) mapa.set(chave, r);
     }
+    const n = Math.max(1, Math.min(1000, Number(limite) || this.LIMITE_RESULTADOS));
     return [...mapa.values()]
       .sort((a, b) => this._chave(a).localeCompare(this._chave(b)))
-      .slice(-this.LIMITE_RESULTADOS);
+      .slice(-n);
   },
 
   async _fetch(url, opcoes = {}) {
@@ -117,12 +152,13 @@ const Sincronizacao = {
     const resposta = await this._fetch(this._urlRecentes(limite));
     const dados = await resposta.json();
     if (!dados) return [];
-    return this._listaUnica(Array.isArray(dados) ? dados : Object.values(dados));
+    return this._listaUnica(Array.isArray(dados) ? dados : Object.values(dados), limite);
   },
 
-  // Compatibilidade: nunca mais baixa o historico inteiro na abertura.
+  // Na abertura baixa a BASE LIMPA completa (ate 500 resultados) para
+  // reconstruir aprendizado e H2H. Depois o polling continua leve, com 10.
   async obterHistoricoCompleto() {
-    return this.obterUltimos(this.LIMITE_RESULTADOS);
+    return this.obterUltimos(this.LIMITE_BASE_APRENDIZADO);
   },
 
   async _putRegistro(r) {
@@ -175,6 +211,27 @@ const Sincronizacao = {
     } finally {
       this._rodando = false;
     }
+  },
+
+  async limparMemoriasAntigasRemotasUmaVez() {
+    if (!this.configurada()) return false;
+    const marcador = "vai_na_fe_memorias_antigas_remotas_limpas_h2h10_v1";
+    try {
+      if (localStorage.getItem(marcador) === "ok") return true;
+    } catch (_) {}
+    let tudoOk = true;
+    for (const caminho of this.CAMINHOS_MEMORIA_ANTIGA || []) {
+      try {
+        await this._fetch(`${this._baseUrl()}/${caminho}.json`, { method: "DELETE" });
+      } catch (e) {
+        tudoOk = false;
+        console.warn(`Nao foi possivel limpar /${caminho}:`, e);
+      }
+    }
+    if (tudoOk) {
+      try { localStorage.setItem(marcador, "ok"); } catch (_) {}
+    }
+    return tudoOk;
   },
 
   observar(fn) {

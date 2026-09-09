@@ -15,12 +15,12 @@
  * - odds abaixo são as referências usadas nos testes e ficam isoladas aqui.
  */
 const ConsultorEntradas = {
-  CHAVE_ESTADO: "esportes_virtuais_consultor_entradas_v2",
+  CHAVE_ESTADO: "esportes_virtuais_consultor_entradas_base_zerada_v1",
   EV_MINIMO: 0.08,
   MIN_AMOSTRA: 40,
   MIN_AMOSTRA_STREAK: 8,
   INICIO_MODELO: 100,
-  CHAVE_MODELO: "esportes_virtuais_consultor_modelo_v2",
+  CHAVE_MODELO: "esportes_virtuais_consultor_modelo_base_zerada_v1",
   MERCADOS_MODELO: ["bm", "ou15", "ou25", "over35"],
 
   ODDS: {

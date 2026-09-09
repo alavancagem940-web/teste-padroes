@@ -1,9 +1,9 @@
 "use strict";
 
 const Armazenamento = {
-    CHAVE_STORAGE: "esportes_virtuais_sessao_v2",
-    CHAVE_TEMPORAL: "esportes_virtuais_temporal_v1",
-    CHAVE_SEM_DADOS: "esportes_virtuais_sem_dados_v1",
+    CHAVE_STORAGE: "esportes_virtuais_sessao_base_limpa_h2h10_v2",
+    CHAVE_TEMPORAL: "esportes_virtuais_temporal_base_limpa_h2h10_v2",
+    CHAVE_SEM_DADOS: "esportes_virtuais_sem_dados_base_limpa_h2h10_v2",
     obterDados() {
         try { return JSON.parse(localStorage.getItem(this.CHAVE_STORAGE)) || []; }
         catch (e) { console.error("Erro ao ler armazenamento:", e); return []; }

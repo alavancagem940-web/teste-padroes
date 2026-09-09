@@ -10,8 +10,8 @@
  * perder a referência da entrada anterior.
  */
 const PalpitesRegistrados = {
-  CHAVE: "esportes_virtuais_palpites_registrados_v1",
-  CHAVE_ULTIMO: "esportes_virtuais_ultimo_palpite_v1",
+  CHAVE: "esportes_virtuais_palpites_registrados_base_zerada_v1",
+  CHAVE_ULTIMO: "esportes_virtuais_ultimo_palpite_base_zerada_v1",
 
   _ler(chave) {
     try { return JSON.parse(localStorage.getItem(chave)) || {}; }

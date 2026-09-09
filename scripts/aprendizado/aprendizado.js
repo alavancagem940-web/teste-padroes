@@ -8,8 +8,8 @@
  * uma experiencia e salva a memoria, sem reconstruir 180 partidas.
  */
 const Aprendizado = {
-  VERSAO: "2026-09-01-MEMORIA-PERMANENTE-V1",
-  CHAVE_STORAGE: "esportes_virtuais_memoria_mercados_v1",
+  VERSAO: "2026-09-09-BASE-LIMPA-H2H10-V2",
+  CHAVE_STORAGE: "esportes_virtuais_memoria_mercados_base_limpa_h2h10_v2",
   _resumo: {},
   _processados: new Set(),
   _iniciado: false,
@@ -67,6 +67,27 @@ const Aprendizado = {
       resumo: this._clonarResumo(this._resumo),
       processados: [...this._processados].slice(-500)
     };
+  },
+
+  estatisticaMercado(k) {
+    let amostra = 0, acertos = 0, erros = 0;
+    for (const item of Object.values(this._resumo || {})) {
+      if (String(item?.k || "") !== String(k || "")) continue;
+      amostra += Math.max(0, Number(item?.amostra) || 0);
+      acertos += Math.max(0, Number(item?.acertos) || 0);
+      erros += Math.max(0, Number(item?.erros) || 0);
+    }
+    const taxa = amostra ? acertos / amostra * 100 : 0;
+    // encolhe amostras pequenas para nao deixar 2/2 superar 30/35
+    const taxaAjustada = amostra ? ((acertos + 3) / (amostra + 6)) * 100 : 50;
+    return { k, amostra, acertos, erros, taxa, taxaAjustada };
+  },
+
+  rankingMercados(minAmostra = 3) {
+    const chaves = ["exato","gols","r12","bm","ou05","under05","ou15","ou25","ou35","over35"];
+    return chaves.map(k => this.estatisticaMercado(k))
+      .filter(x => x.amostra >= Math.max(0, Number(minAmostra) || 0))
+      .sort((a,b) => b.taxaAjustada-a.taxaAjustada || b.amostra-a.amostra || b.taxa-a.taxa);
   },
 
   _salvarLocal() {
@@ -160,6 +181,7 @@ const Aprendizado = {
   aprenderIndice(resultados, indice) {
     if (!Array.isArray(resultados) || indice <= 0 || indice >= resultados.length) return false;
     const alvo = resultados[indice];
+    if (!alvo?.mandante || !alvo?.visitante || !alvo?._temporal?.data || !alvo?._temporal?.horario) return false;
     const chaveResultado = this._chaveResultado(alvo);
     if (!chaveResultado || this._processados.has(chaveResultado)) return false;
 
@@ -194,25 +216,30 @@ const Aprendizado = {
     return true;
   },
 
-  aprenderPendentes(resultados) {
-    if (this._aprendendo || !Array.isArray(resultados)) return;
+  aprenderPendentes(resultados, aoConcluir = null) {
+    if (this._aprendendo || !Array.isArray(resultados)) return false;
     const indices = [];
-    for (let i = Math.max(1, resultados.length - 10); i < resultados.length; i++) {
+    for (let i = 1; i < resultados.length; i++) {
       const chave = this._chaveResultado(resultados[i]);
       if (chave && !this._processados.has(chave)) indices.push(i);
     }
-    if (!indices.length) return;
+    if (!indices.length) {
+      if (typeof aoConcluir === "function") { try { aoConcluir(); } catch (_) {} }
+      return false;
+    }
     this._aprendendo = true;
     const proximo = () => {
       const indice = indices.shift();
       if (indice == null) {
         this._aprendendo = false;
+        if (typeof aoConcluir === "function") { try { aoConcluir(); } catch (_) {} }
         return;
       }
       try { this.aprenderIndice(resultados, indice); }
       catch (e) { console.warn("Falha ao aprender resultado novo:", e); }
-      setTimeout(proximo, 25);
+      setTimeout(proximo, 20);
     };
-    setTimeout(proximo, 25);
+    setTimeout(proximo, 20);
+    return true;
   }
 };

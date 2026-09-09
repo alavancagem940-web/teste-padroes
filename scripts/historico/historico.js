@@ -71,7 +71,13 @@ const Historico = {
             placar: r.placar,
             _temporal: r._temporal || null,
             fonte: r.fonte || (r._temporal ? "ao-vivo" : "backup"),
-            data: r.data || null
+            data: r.data || null,
+            mandante: r.mandante || null,
+            visitante: r.visitante || null,
+            escudoMandante: r.escudoMandante || null,
+            escudoVisitante: r.escudoVisitante || null,
+            liga: r.liga || null,
+            timesConfirmados: Boolean(r.mandante && r.visitante)
         }));
         this.metadadosTemporais = this.dadosBrutos.map(x => x?._temporal || null);
         this.baseEstudoBrutosIndice = Math.min(this.baseEstudoQuantidade, this.dadosBrutos.length);
@@ -234,26 +240,55 @@ const Historico = {
         return this.sequenciaAtual.find(x => x?._temporal?.data === t.data && x?._temporal?.horario === t.horario) || null;
     },
 
+    _aplicarTimesResultado(destino, origem) {
+        if (!destino || !origem) return false;
+        let mudou = false;
+        for (const campo of ["mandante", "visitante", "escudoMandante", "escudoVisitante", "liga"]) {
+            const valor = origem?.[campo];
+            if (valor !== undefined && valor !== null && String(valor).trim() && destino[campo] !== valor) {
+                destino[campo] = valor;
+                mudou = true;
+            }
+        }
+        if (destino.mandante && destino.visitante) destino.timesConfirmados = true;
+        return mudou;
+    },
+
     importarResultadosAoVivo(lista, salvar = true) {
         if (!Array.isArray(lista)) return 0;
-        let adicionados = 0;
+        let adicionados = 0, enriquecidos = 0;
         for (const item of lista) {
             const r = item && typeof item === "object" ? item : null;
-            if (!r?.placar || r?.fonte !== "ao-vivo" || !r?._temporal?.data || !r?._temporal?.horario) continue;
-            const resultado = this.adicionar(r.placar, false, {
+            if (!r?.placar || r?.fonte !== "ao-vivo" || !r?._temporal?.data || !r?._temporal?.horario || !r?.mandante || !r?.visitante) continue;
+            const metaTemporal = {
                 data: r._temporal.data,
                 horario: r._temporal.horario,
                 hora: r._temporal.hora,
                 minuto: r._temporal.minuto,
                 slot3: r._temporal.slot3,
-                timeZone: r._temporal.timeZone || "Europe/London",
+                timeZone: r._temporal.timeZone || "Europe/London"
+            };
+            const resultado = this.adicionar(r.placar, false, {
+                ...metaTemporal,
                 __fonte: "ao-vivo",
                 __remoto: true,
                 __dataCriacao: r.data || null
             });
-            if (resultado && !resultado.duplicado) adicionados++;
+            if (resultado && !resultado.duplicado) {
+                if (this._aplicarTimesResultado(resultado, r)) enriquecidos++;
+                adicionados++;
+            } else if (resultado?.duplicado) {
+                // Se o placar já estava no cache sem os nomes, aproveita uma
+                // nova leitura do Firebase para completar a mesma partida.
+                const existente = this.obterResultadoNoHorario(metaTemporal);
+                if (this._aplicarTimesResultado(existente, r)) enriquecidos++;
+            }
         }
-        if (salvar && adicionados) this.persistir();
+        this._ultimoEnriquecimentoTimes = enriquecidos;
+        if (salvar && (adicionados || enriquecidos)) {
+            this._sincronizarOrdemAtual();
+            this.persistir();
+        }
         return adicionados;
     },
 
@@ -269,7 +304,13 @@ const Historico = {
                 placar: r.placar,
                 _temporal: r._temporal,
                 fonte: "ao-vivo",
-                data: r.data || null
+                data: r.data || null,
+                mandante: r.mandante || null,
+                visitante: r.visitante || null,
+                escudoMandante: r.escudoMandante || null,
+                escudoVisitante: r.escudoVisitante || null,
+                liga: r.liga || null,
+                timesConfirmados: Boolean(r.mandante && r.visitante)
             }));
         Armazenamento.salvarDados(recentes);
         Armazenamento.salvarMetadadosTemporais(recentes.map(x => x._temporal));

@@ -1,0 +1,13 @@
+VAI NA FÉ — V20 — V19 PROMOVIDA PARA O NÚCLEO
+
+- Todo o comportamento que estava em teste/app-teste.js foi separado novamente nos arquivos oficiais do núcleo.
+- A camada de próximas partidas foi promovida para scripts/dados/firebase-proximas-partidas.js.
+- A análise contextual por times/H2H/forma foi promovida para scripts/analise/analise-contextual-times.js.
+- A interface de entradas, H2H e últimos 10 casa/visitante foi promovida para scripts/interface/interface-entradas.js.
+- Últimos 10 do mandante em casa e últimos 10 do visitante fora continuam com peso maior.
+- Histórico completo casa/fora continua com peso menor.
+- H2H continua como peso, sem trava mínima.
+- Memória remota permanece em memoria_mercados_v3_base_limpa_h2h10; ela não foi zerada.
+- Over 0.5 continua fora das sugestões.
+- Escudos locais/cache foram promovidos para a raiz e integrados ao service-worker principal.
+- A pasta teste foi removida desta versão para que o teste seja feito diretamente pelo núcleo oficial.

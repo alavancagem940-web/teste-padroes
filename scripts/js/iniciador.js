@@ -11,8 +11,8 @@ document.addEventListener("DOMContentLoaded", () => {
       throw new Error("Modulos principais ou memoria consolidada nao encontrados.");
     }
 
-    // A memoria treinada esta dentro do proprio site. Nao existe espera por
-    // Firebase nem releitura de backup para os mercados lembrarem o que sabem.
+    // Esta versão de teste nasce com base vazia. Não há backup embutido nem
+    // memória antiga: somente resultados novos do Firebase passam a alimentar o histórico.
     const baseMemoria = MemoriaConsolidada.criarBase();
     Historico.iniciar();
     Historico.carregarDados(baseMemoria, false, {
@@ -36,14 +36,16 @@ document.addEventListener("DOMContentLoaded", () => {
         item.fonte === "ao-vivo" &&
         item.placar &&
         item._temporal?.data &&
-        item._temporal?.horario
+        item._temporal?.horario &&
+        item.mandante &&
+        item.visitante
       )
       .sort((a, b) =>
         `${a._temporal.data}|${a._temporal.horario}`.localeCompare(
           `${b._temporal.data}|${b._temporal.horario}`
         )
       )
-      .slice(-10);
+      .slice(-20);
     if (locaisRecentes.length) {
       Historico.importarResultadosAoVivo(locaisRecentes, false);
     }
@@ -54,7 +56,7 @@ document.addEventListener("DOMContentLoaded", () => {
     // A tela abre ANTES de qualquer consulta remota.
     Interface.iniciar();
     console.log(
-      "Painel aberto com memoria permanente e",
+      "Painel aberto com base zerada e",
       Historico.obterQuantidadeComHorario(),
       "resultado(s) recente(s)."
     );
@@ -62,26 +64,49 @@ document.addEventListener("DOMContentLoaded", () => {
     if (typeof Sincronizacao !== "undefined" && Sincronizacao.configurada()) {
       Sincronizacao.observar(lista => {
         const adicionados = Historico.importarResultadosAoVivo(lista, true);
+        const timesEnriquecidos = Number(Historico._ultimoEnriquecimentoTimes || 0);
         if (adicionados && typeof Aprendizado !== "undefined") {
           Aprendizado.aprenderPendentes(Historico.obterTodos());
         }
-        if (adicionados && typeof Interface !== "undefined") {
+        // Mesmo quando o placar já estava no cache local, uma leitura nova do
+        // Firebase pode completar mandante/visitante. Nesse caso a interface
+        // também precisa redesenhar a linha sem contar um novo resultado.
+        if ((adicionados || timesEnriquecidos) && typeof Interface !== "undefined") {
           Interface.atualizar();
         }
       });
-      Sincronizacao.iniciar();
+      // Primeiro limpa as memórias derivadas antigas e reconstrói a base completa.
+      // Só depois liga o polling de 10 resultados; assim nenhum snapshot de entrada
+      // nasce antes de o ranking dos mercados terminar de aprender a base limpa.
+      (async () => {
+        try {
+          await Sincronizacao.limparMemoriasAntigasRemotasUmaVez();
 
-      // Atualiza a memoria em segundo plano. Se a rede falhar, a memoria
-      // embutida/local continua pronta e o site permanece aberto.
-      Sincronizacao.obterMemoriaAprendizado().then(remota => {
-        if (
-          remota &&
-          typeof Aprendizado !== "undefined" &&
-          Aprendizado.importar(remota)
-        ) {
-          Interface.atualizar();
+          // A V3 é exclusiva desta base limpa. Se já existir em outro dispositivo,
+          // pode ser importada sem misturar V1/V2.
+          try {
+            const remota = await Sincronizacao.obterMemoriaAprendizado();
+            if (remota && typeof Aprendizado !== "undefined") Aprendizado.importar(remota);
+          } catch (_) {}
+
+          const listaCompleta = await Sincronizacao.obterHistoricoCompleto();
+          Historico.importarResultadosAoVivo(listaCompleta || [], true);
+
+          const finalizar = () => {
+            if (typeof Interface !== "undefined") Interface.atualizar();
+            Sincronizacao.iniciar();
+          };
+          if (typeof Aprendizado !== "undefined") {
+            const iniciou = Aprendizado.aprenderPendentes(Historico.obterTodos(), finalizar);
+            if (!iniciou) finalizar();
+          } else {
+            finalizar();
+          }
+        } catch (e) {
+          console.warn("Base limpa completa indisponivel:", e);
+          Sincronizacao.iniciar();
         }
-      }).catch(() => {});
+      })();
     }
 
     // Mantem o palpite da partida atual quando o navegador e reaberto.
