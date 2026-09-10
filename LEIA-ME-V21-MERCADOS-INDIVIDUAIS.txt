@@ -1,0 +1,26 @@
+V21 — MERCADOS INDIVIDUAIS + VANTAGEM SOBRE A BASE
+
+BASE
+- Partiu da V20 TUDO NO NÚCLEO.
+- Antes da alteração foi comparada com a V19 (versão imediatamente anterior) e com a estrutura funcional anterior.
+- A V20 já continha a promoção da forma recente casa/fora e H2H como peso; esta V21 altera somente o aprendizado/ranking necessário para a nova regra e o cache/versionamento.
+
+REGRAS NOVAS
+1. Cada lado tem memória própria: MAIS 1.5 e MENOS 1.5 não compartilham acerto, amostra ou reputação.
+2. O mesmo vale para 2.5, BM SIM/NÃO, 1/X/2, O3.5, U0.5, total exato e placar exato.
+3. Dados do lado oposto podem existir como contexto bruto do jogo, mas nunca entram como taxa de acerto do outro lado.
+4. Frequência bruta não dá prioridade. O ranking usa principalmente a vantagem contextual sobre a taxa-base daquele lado.
+5. Últimos 10 do mandante em casa e do visitante fora continuam com peso maior; histórico completo recebe peso menor.
+6. H2H continua como peso, sem trava.
+7. O0.5 continua fora das 3 sugestões.
+8. U3.5 continua fixo/separado e não disputa as 3 sugestões nem a taxa delas.
+9. O3.5 continua normal e pode aparecer nas 3 sugestões.
+10. As 3 continuam sendo SUGESTÕES para análise manual; não são tratadas como 3 entradas automáticas.
+
+MEMÓRIA
+- Nova memória derivada: /memoria_mercados_v4_individuais.
+- A memória V3 antiga não é apagada.
+- A V4 é reconstruída cronologicamente a partir do historico_compartilhado já existente, portanto os resultados brutos não são perdidos.
+
+VERSÃO
+- 2026-09-10-MERCADOS-INDIVIDUAIS-V1

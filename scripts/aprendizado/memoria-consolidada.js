@@ -8,7 +8,7 @@
  * resultados recebidos do Firebase (/historico_compartilhado).
  */
 const MemoriaConsolidada = {
-  versao: "2026-09-09-BASE-LIMPA-H2H10-V2",
+  versao: "2026-09-10-MERCADOS-INDIVIDUAIS-V1",
   quantidade: 0,
   placares: "",
   aprendizadoInicial: {},

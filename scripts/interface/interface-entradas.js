@@ -25,7 +25,7 @@
 
   Interface._partidaSelecionadaTeste = null;
   Interface._resultadoSelecionadoTeste = null;
-  Interface._CHAVE_SUGESTOES_HISTORICAS_TESTE = "vai_na_fe_sugestoes_historicas_h2h10_v16";
+  Interface._CHAVE_SUGESTOES_HISTORICAS_TESTE = "vai_na_fe_sugestoes_historicas_individuais_v21";
   Interface._assinaturaSnapshotsSugestoesTeste = "";
 
   Interface.iniciar = function () {
@@ -128,8 +128,21 @@
     return /(?:mais\s+de\s+0\.5|over\s+0\.5)/i.test(titulo);
   };
 
+  Interface._ehUnder35FixoSugestaoTeste = function (s) {
+    if (!s) return false;
+    const k = String(s.mercado ?? s.k ?? "").trim();
+    const valor = String(s.valor ?? s.palpite?.valor ?? "").trim().toUpperCase();
+    // Só o UNDER 3.5 fica fora. OVER 3.5 continua liberado normalmente.
+    if (k === "ou35" && valor === "MENOS") return true;
+    const titulo = String(s.titulo ?? s.rotuloCompleto ?? s.mercadoCompleto ?? s.mercadoNome ?? s.nome ?? "")
+      .toLowerCase().replace(/,/g, ".");
+    return /(?:menos\s+de\s+3\.5|under\s+3\.5)/i.test(titulo);
+  };
+
   Interface._filtrarSugestoesTeste = function (lista) {
-    return (Array.isArray(lista) ? lista : []).filter(x => !this._ehOver05SugestaoTeste(x));
+    return (Array.isArray(lista) ? lista : []).filter(x =>
+      !this._ehOver05SugestaoTeste(x) && !this._ehUnder35FixoSugestaoTeste(x)
+    );
   };
 
   Interface._sugestoesEntradasTeste = function (d, meta) {
@@ -161,6 +174,9 @@
             taxaHistorica: x.taxaHistorica,
             amostraHistorica: x.amostraHistorica,
             taxaAjustada: x.taxaAjustada,
+            vantagemHistorica: x.vantagemHistorica,
+            idIndividual: x.idIndividual,
+            forca: x.forca,
             score: x.score
           }));
           candidatos.sort((a,b) =>
@@ -859,7 +875,7 @@
         <span class="teste-suggestion-number">${i + 1}</span>
         <div><b>${esc(s.titulo)}</b>${s.descricao ? `<small>${esc(s.descricao)}</small>` : ""}</div>
         <div class="teste-conf"><small>CONFIANÇA</small><b>${pct(s.confianca)}</b></div>
-        <em class="${s.principal ? "principal" : "alternativa"}">${s.principal ? "PRINCIPAL" : "ALTERNATIVA"}</em>
+        <em class="${s.principal ? "principal" : "alternativa"}">${s.principal ? "PRINCIPAL" : "ALTERNATIVA"}${s.forca ? ` · ${esc(s.forca)}` : ""}</em>
       </div>`).join("") : `<div class="teste-empty">${AGUARDA}</div>`;
       const casaHtml = this._htmlUltimosCasaVisitanteTeste(forma.casa, mandante, "casa");
       const visitanteHtml = this._htmlUltimosCasaVisitanteTeste(forma.visitante, visitante, "visitante");
@@ -957,7 +973,7 @@
       .teste-details{padding:10px;min-height:535px}.teste-detail-head{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #142842;padding:0 0 8px}.teste-detail-head h2{margin:0!important;font-size:13px!important}.teste-detail-head span{font-size:8px;padding:4px 7px;border-radius:3px;background:#5d157a;color:#f5c8ff}.teste-league-title{text-align:center;color:#a8b4c9;font-size:9px;padding:8px 0 3px}
       .teste-match-hero{display:grid;grid-template-columns:1fr 110px 1fr;align-items:center;gap:8px;padding:2px 0 9px}.teste-team{display:flex;flex-direction:column;align-items:center;gap:4px;text-align:center}.teste-team.teste-team-side{flex-direction:row;justify-content:center;gap:8px}.teste-team b{font-size:11px;max-width:140px;overflow-wrap:anywhere}.teste-team-logo{width:42px;height:42px;object-fit:contain;flex:0 0 auto}.teste-team-logo.mini{width:20px;height:20px}.teste-team-missing{display:inline-grid;place-items:center;border-radius:50%;border:1px solid #28415f;background:#0a1728;color:#91a8c7;font-size:8px;font-weight:800}.teste-kickoff{text-align:center;display:flex;flex-direction:column;align-items:center}.teste-kickoff b{font-size:22px}.teste-kickoff small{font-size:8px;color:#8fa0bc}.teste-kickoff span{font-size:11px;color:#6d7e9b;margin-top:2px}
       .teste-best-market{display:grid;grid-template-columns:1fr 155px;gap:10px;border:1px solid #0d4a39;background:linear-gradient(90deg,#042d24,#071929);border-radius:6px;padding:8px 10px}.teste-best-title{display:flex;gap:10px;align-items:center}.teste-best-title>span{font-size:25px;color:#00df94}.teste-best-title small{display:block;color:#aab8ca;font-size:8px}.teste-best-title b{display:block;font-size:15px;margin-top:2px}.teste-best-title p{margin:2px 0 0;color:#9ab1b8;font-size:8px}.teste-best-metrics{display:grid;grid-template-columns:1fr;align-items:center}.teste-best-metrics div{text-align:center;border-left:1px solid #14523f}.teste-best-metrics small{display:block;font-size:7px;color:#93a5b8}.teste-best-metrics b{font-size:16px}
-      .teste-section-title{font-size:9px;font-weight:800;margin:9px 0 4px;color:#cbd5e6}.teste-suggestion-list{border-top:1px solid #14253c}.teste-suggestion-row{display:grid;grid-template-columns:26px minmax(220px,1fr) 70px 78px;gap:7px;align-items:center;padding:7px 5px;border-bottom:1px solid #14253c}.teste-suggestion-number{width:20px;height:20px;border-radius:50%;display:grid;place-items:center;background:#0d2749;color:#c3d8ff;font-size:9px}.teste-suggestion-row>div:nth-child(2){display:flex;flex-direction:column}.teste-suggestion-row>div:nth-child(2) b{font-size:10px}.teste-suggestion-row>div:nth-child(2) small{font-size:8px;color:#8293ae}.teste-conf{text-align:center}.teste-conf small{display:block;font-size:6px;color:#7f90aa}.teste-conf b{font-size:11px}.teste-suggestion-row em{font-style:normal;font-size:7px;text-align:center;padding:4px;border-radius:3px}.teste-suggestion-row em.principal{color:#63ffbc;background:#064f38;border:1px solid #0c865e}.teste-suggestion-row em.alternativa{color:#72bcff;background:#082d52;border:1px solid #0c5793}
+      .teste-section-title{font-size:9px;font-weight:800;margin:9px 0 4px;color:#cbd5e6}.teste-suggestion-list{border-top:1px solid #14253c}.teste-suggestion-row{display:grid;grid-template-columns:26px minmax(220px,1fr) 70px 108px;gap:7px;align-items:center;padding:7px 5px;border-bottom:1px solid #14253c}.teste-suggestion-number{width:20px;height:20px;border-radius:50%;display:grid;place-items:center;background:#0d2749;color:#c3d8ff;font-size:9px}.teste-suggestion-row>div:nth-child(2){display:flex;flex-direction:column}.teste-suggestion-row>div:nth-child(2) b{font-size:10px}.teste-suggestion-row>div:nth-child(2) small{font-size:8px;color:#8293ae}.teste-conf{text-align:center}.teste-conf small{display:block;font-size:6px;color:#7f90aa}.teste-conf b{font-size:11px}.teste-suggestion-row em{font-style:normal;font-size:7px;text-align:center;padding:4px;border-radius:3px}.teste-suggestion-row em.principal{color:#63ffbc;background:#064f38;border:1px solid #0c865e}.teste-suggestion-row em.alternativa{color:#72bcff;background:#082d52;border:1px solid #0c5793}
       .teste-analysis{border:1px solid #8422bd;background:linear-gradient(90deg,#22083b,#10091f);border-radius:6px;padding:8px 10px;margin-top:8px}.teste-analysis b{font-size:9px;color:#fb3cff}.teste-analysis p{font-size:9px;line-height:1.45;color:#c7b9da;margin:4px 0 0}.teste-bottom-details{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:8px}.teste-bottom-details>div{border:1px solid #172943;border-radius:6px;padding:7px}.teste-bottom-details h3{font-size:8px;margin:0 0 6px}.teste-recent-scores{display:flex;gap:4px;flex-wrap:wrap}.teste-score-chip{font-size:9px;font-weight:800;padding:5px 8px;border-radius:4px;background:#0b3d28;color:#70ff9d;border:1px solid #155c3c}.teste-bottom-form .teste-h2h-box{grid-column:1/-1}.teste-form-head{display:grid;grid-template-columns:1fr auto;gap:2px 8px;align-items:center;margin-bottom:5px}.teste-form-head h3{grid-column:1/-1;margin-bottom:2px!important}.teste-form-head b{font-size:9px;color:#e7effc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.teste-form-head span{font-size:7px;font-weight:900;color:#8da2bb;border:1px solid #223752;border-radius:999px;padding:2px 5px}.teste-form-list{display:grid;gap:2px}.teste-form-row{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);align-items:center;gap:6px;padding:5px 1px;border-bottom:1px solid #14243a}.teste-form-row:last-child{border-bottom:0}.teste-form-time{font-size:7px;font-weight:700;color:#aebed1;white-space:normal;line-height:1.2}.teste-form-time.casa{text-align:right}.teste-form-time.fora{text-align:left}.teste-form-time.alvo{color:#eef7ff;font-weight:900}.teste-form-score{min-width:38px;text-align:center;font-size:8px;color:#78f6ac}.teste-form-row small{grid-column:1/-1;text-align:center;color:#60758e;font-size:6px;margin-top:-2px}.teste-form-empty{font-size:7px;color:#8e7aa9;padding:6px 1px;line-height:1.35}.teste-h2h{display:grid;gap:3px}.teste-h2h-row{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);align-items:center;gap:7px;font-size:8px;padding:6px 2px;border-bottom:1px solid #172943}.teste-h2h-row .teste-h2h-time{font-weight:800;color:#d7e5f7;white-space:normal}.teste-h2h-row .teste-h2h-time.casa{text-align:right}.teste-h2h-row .teste-h2h-time.fora{text-align:left}.teste-h2h-row .teste-h2h-score{min-width:42px;text-align:center;color:#78f6ac;font-size:9px}.teste-h2h-row small{grid-column:1/-1;text-align:center;color:#647991;font-size:6px;margin-top:-2px}.teste-h2h-row.vazio{grid-template-columns:1fr;color:#8e7aa9}.teste-h2h-row.vazio span{text-align:left}.teste-empty{text-align:center;color:#8f7aa9;padding:14px}
       .teste-no-upcoming,.teste-no-selection{min-height:120px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:5px;text-align:center;color:#b9c7da;padding:22px}.teste-no-upcoming b,.teste-no-selection b{font-size:14px;color:#d8e4f5}.teste-no-upcoming small,.teste-no-selection small{font-size:9px;color:#7f91aa}.teste-details-empty{min-height:300px}
       .teste-firebase-setting input{background:#061326;color:white;border:1px solid #16528c;border-radius:5px;padding:7px;min-width:260px}.teste-url-readonly{font-size:9px;max-width:360px;overflow-wrap:anywhere;text-align:right}.teste-fb-status{display:block;padding:8px;color:#9eb0c7}.teste-fb-status.online{color:#24e999}.teste-fb-status.erro{color:#ff6371}

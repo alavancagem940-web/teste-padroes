@@ -205,11 +205,11 @@ const AnaliseContextualTimes = {
     return `${hist.length}|${u?._ctxData || ""}|${u?._ctxHorario || ""}|${u?.placar || ""}`;
   },
 
-  _confiabilidade(hist, k, recorteNome) {
-    // Aprende, por mercado, se uma família de contexto costuma melhorar a
-    // probabilidade do resultado real em relação à frequência geral anterior.
-    // Backtest leve e cacheado; nunca usa o resultado-alvo para montar o recorte.
-    const chave = `${this._assinatura(hist)}|${k}|${recorteNome}`;
+  _confiabilidade(hist, k, valor, recorteNome) {
+    // Aprende a confiabilidade do recorte PARA ESTE LADO específico.
+    // Ex.: um recorte pode ajudar MAIS 1.5 e atrapalhar MENOS 1.5;
+    // uma coisa não herda a reputação da outra.
+    const chave = `${this._assinatura(hist)}|${k}|${String(valor)}|${recorteNome}`;
     if (this._cacheConfiabilidade.has(chave)) return this._cacheConfiabilidade.get(chave);
     if (hist.length < 60) return 1;
 
@@ -221,28 +221,29 @@ const AnaliseContextualTimes = {
       const meta = alvo?._ctxMeta;
       if (!meta) continue;
       const rec = this._recortes(anteriores, meta)[recorteNome] || [];
-      if (rec.length < this.MIN_FONTE) continue;
+      const minimoFonte = (recorteNome === "h2h" || recorteNome === "h2hMesmo") ? 1 : this.MIN_FONTE;
+      if (rec.length < minimoFonte) continue;
       const real = this._valorMercado(alvo, k);
       if (real == null) continue;
-      const opcoes = this._opcoes(k, anteriores);
-      if (!opcoes.length) continue;
-      const geral = opcoes.map(v => ({v, t:this._taxa(anteriores,k,v,0.5,0)}));
-      const baseTop = geral.sort((a,b)=>b.t.p-a.t.p)[0];
-      const fonte = opcoes.map(v => {
-        const p0 = this._taxa(anteriores,k,v,0.5,0).p;
-        return {v, t:this._taxa(rec,k,v,p0)};
-      }).sort((a,b)=>b.t.p-a.t.p)[0];
-      if (!baseTop || !fonte || fonte.v === baseTop.v) continue;
+
+      const baseP = this._taxa(anteriores, k, valor, 0.5, 0).p;
+      const fonte = this._taxa(rec, k, valor, baseP);
+      const desvio = fonte.p - baseP;
+      if (Math.abs(desvio) < 0.02) continue;
+
       usados++;
-      if (String(fonte.v) === String(real)) ganhos++; else perdas++;
+      const aconteceu = String(real) === String(valor);
+      const direcaoAcertou = desvio > 0 ? aconteceu : !aconteceu;
+      if (direcaoAcertou) ganhos++; else perdas++;
     }
+
     let mult = 1;
     if (usados >= 12) {
       const taxa = ganhos / Math.max(1, ganhos + perdas);
       mult = Math.max(0.72, Math.min(1.28, 0.82 + taxa * 0.42));
     }
     this._cacheConfiabilidade.set(chave, mult);
-    if (this._cacheConfiabilidade.size > 500) this._cacheConfiabilidade.delete(this._cacheConfiabilidade.keys().next().value);
+    if (this._cacheConfiabilidade.size > 800) this._cacheConfiabilidade.delete(this._cacheConfiabilidade.keys().next().value);
     return mult;
   },
 
@@ -259,6 +260,33 @@ const AnaliseContextualTimes = {
     }[nome] || 1;
     const qualidade = n > 0 ? n / (n + this.PRIOR_PADRAO) : 0;
     return base * qualidade * (Number.isFinite(confiabilidade) ? confiabilidade : 1);
+  },
+
+  _idIndividual(k, valor) {
+    return `${String(k || "")}:${String(valor ?? "")}`;
+  },
+
+  _podeVirarSugestao(k, valor) {
+    const v = String(valor ?? "").toUpperCase();
+    // O0.5 continua apenas como cálculo interno.
+    if (k === "ou05") return false;
+    // U3.5 continua fixo/separado e NÃO disputa as 3 sugestões.
+    // O3.5 disputa normalmente pelo especialista dedicado over35.
+    if (k === "ou35") return false;
+    if (k === "under05") return v === "MENOS";
+    if (k === "over35") return v === "MAIS";
+    return true;
+  },
+
+  _forcaSinal(edge, vantagemAprendida, qualidade, amostraAprendida, pContexto, taxaAprendida) {
+    const fatorAmostra = Math.min(1, Math.max(0, Number(amostraAprendida) || 0) / 20);
+    const sinal = (Number(edge) || 0) * 100 + (Number(vantagemAprendida) || 0) * 100 * 0.60 * fatorAmostra;
+    const seguranca = Math.max(Number(pContexto) || 0, fatorAmostra ? (Number(taxaAprendida) || 0) : 0);
+    // Um placar exato de 10% pode ter grande vantagem relativa, mas não vira
+    // "FORTE" só por isso: força também exige chance absoluta razoável.
+    if (sinal >= 8 && qualidade >= 0.18 && seguranca >= 0.45) return "FORTE";
+    if (sinal >= 4 && seguranca >= 0.35) return "BOA";
+    return "MODERADA";
   },
 
   _rotulo(k, valor) {
@@ -292,74 +320,122 @@ const AnaliseContextualTimes = {
       const opcoes = this._opcoes(k, hist);
       if (!opcoes.length) continue;
       const avaliados = [];
+
       for (const valor of opcoes) {
+        // Cada opção é avaliada e aprendida como mercado individual.
+        // A taxa do lado oposto nunca entra aqui.
         const global = this._taxa(hist, k, valor, 0.5, 0);
         let soma = global.p;
         let peso = 1;
         const evidencias = [];
+
         for (const nome of ["mandanteRecente","visitanteRecente","mandanteHistorico","visitanteHistorico","h2h","h2hMesmo","momento","horario9","horario30","mesmaHora"]) {
           const amostra = recortes[nome] || [];
-          // H2H pode contribuir desde o primeiro confronto, mas com peso muito pequeno.
-          // Os demais recortes continuam exigindo a amostra mínima normal.
           const minimoFonte = (nome === "h2h" || nome === "h2hMesmo") ? 1 : this.MIN_FONTE;
           if (amostra.length < minimoFonte) continue;
           const t = this._taxa(amostra, k, valor, global.p);
-          const rel = this._confiabilidade(hist, k, nome);
+          const rel = this._confiabilidade(hist, k, valor, nome);
           const w = this._pesoFonte(nome, t.n, rel);
           if (w <= 0) continue;
-          soma += t.p * w; peso += w;
+          soma += t.p * w;
+          peso += w;
           evidencias.push({nome,n:t.n,p:t.p,w,rel});
         }
+
         if (h2hFirebase.length >= 1) {
           const t = this._taxa(h2hFirebase,k,valor,global.p,8);
           const w = this._pesoFonte("h2hFirebase",t.n,1);
-          soma += t.p*w; peso += w;
+          soma += t.p*w;
+          peso += w;
           evidencias.push({nome:"h2hFirebase",n:t.n,p:t.p,w,rel:1});
         }
+
         const base = mercadosBase?.[k];
         if (base?.ativo && base?.palpite && String(base.palpite.valor) === String(valor)) {
           const pBase = Math.max(0, Math.min(1, Number(base.palpite.percentual || 0)/100));
           if (pBase > 0) {
             const w = 0.85;
-            soma += pBase*w; peso += w;
+            soma += pBase*w;
+            peso += w;
             evidencias.push({nome:"sequencia",n:Math.max(3,Math.round((resultados||[]).length/20)),p:pBase,w,rel:1});
           }
         }
+
         const p = soma / peso;
         const edge = p - global.p;
         const qualidade = Math.min(1, evidencias.reduce((s,e)=>s+Math.min(e.n,30),0)/120);
-        const score = p + Math.max(-0.12, Math.min(0.18, edge*0.9)) + qualidade*0.025;
-        avaliados.push({valor,p,global:global.p,edge,qualidade,score,evidencias});
+        const desempenho = (typeof Aprendizado !== "undefined" && typeof Aprendizado.estatisticaMercado === "function")
+          ? Aprendizado.estatisticaMercado(k, valor)
+          : {amostra:0,taxa:0,taxaAjustada:50};
+        const taxaAprendida = (Number(desempenho.taxaAjustada) || 50) / 100;
+        const vantagemAprendida = desempenho.amostra >= 3 ? taxaAprendida - global.p : 0;
+        const fatorAmostra = Math.min(1, Math.max(0, Number(desempenho.amostra) || 0) / 20);
+        const qualidadeHistorica = desempenho.amostra >= 3
+          ? Math.max(0, Math.min(1, (taxaAprendida - 0.35) / 0.30))
+          : 0;
+        const segurancaIndividual = desempenho.amostra >= 3 ? Math.max(p, taxaAprendida) : p;
+        const penalidadeBaixa = Math.max(0, 0.35 - segurancaIndividual) * 0.55;
+
+        // IMPORTANTE: a frequência bruta NÃO dá pontos no ranking.
+        // O que vale é estar mais forte NESTE JOGO do que a própria taxa-base.
+        // A taxa individual só ajuda se também tiver qualidade absoluta; assim
+        // um placar exato raro não sobe ao Top 3 só por dobrar de 7% para 14%.
+        const score = 0.50
+          + Math.max(-0.20, Math.min(0.30, edge)) * 1.35
+          + Math.max(-0.25, Math.min(0.25, vantagemAprendida)) * 0.65 * fatorAmostra * qualidadeHistorica
+          + qualidade * 0.06
+          - penalidadeBaixa;
+        const forca = this._forcaSinal(edge, vantagemAprendida, qualidade, desempenho.amostra, p, taxaAprendida);
+
+        avaliados.push({
+          valor,p,global:global.p,edge,qualidade,score,evidencias,forca,
+          desempenho, vantagemAprendida, idIndividual:this._idIndividual(k,valor)
+        });
       }
-      avaliados.sort((a,b)=>b.score-a.score || b.p-a.p);
+
+      avaliados.sort((a,b)=>
+        b.score-a.score ||
+        b.edge-a.edge ||
+        (Number(b.desempenho?.taxaAjustada)||0)-(Number(a.desempenho?.taxaAjustada)||0) ||
+        b.p-a.p
+      );
       const melhor = avaliados[0];
       if (!melhor) continue;
       mercados[k] = { k, melhor, opcoes:avaliados };
+
+      // ou05 e ou35 continuam calculados para os painéis, porém não disputam
+      // as sugestões: O0.5 fica fora; U3.5 é fixo; O3.5 vem por over35.
+      if (!this._podeVirarSugestao(k, melhor.valor)) continue;
+
       const fortes = melhor.evidencias
         .filter(e=>e.p > melhor.global + 0.02)
         .sort((a,b)=>b.w-a.w).slice(0,3);
       const nomes = {mandanteRecente:"últimos 10 do mandante em casa",visitanteRecente:"últimos 10 do visitante fora",mandanteHistorico:"histórico completo do mandante em casa",visitanteHistorico:"histórico completo do visitante fora",h2h:"H2H",h2hMesmo:"H2H mesmo mando",momento:"momento recente",horario9:"faixa ±9 min",horario30:"faixa ±30 min",mesmaHora:"mesma hora",h2hFirebase:"confrontos diretos",sequencia:"sequência atual"};
       const apoio = fortes.length ? fortes.map(e=>`${nomes[e.nome]||e.nome} ${Math.round(e.p*100)}%/${e.n}`).join(" · ") : "sem recorte dominante";
-      const desempenho = (typeof Aprendizado !== "undefined" && typeof Aprendizado.estatisticaMercado === "function")
-        ? Aprendizado.estatisticaMercado(k) : {amostra:0,taxa:0,taxaAjustada:50};
-      const bonusDesempenho = desempenho.amostra >= 3 ? ((desempenho.taxaAjustada - 50) / 100) * 0.16 : 0;
+      const desempenho = melhor.desempenho || {amostra:0,taxa:0,taxaAjustada:50};
+      const vantagemPp = melhor.edge * 100;
+      const histPp = melhor.vantagemAprendida * 100;
+
       candidatos.push({
         k, valor:melhor.valor, titulo:this._rotulo(k,melhor.valor),
-        confianca:melhor.p*100, media:melhor.global*100, ganho:melhor.edge*100,
-        qualidade:melhor.qualidade*100, score:melhor.score + bonusDesempenho,
+        idIndividual:melhor.idIndividual, forca:melhor.forca,
+        confianca:melhor.p*100, media:melhor.global*100, ganho:vantagemPp,
+        qualidade:melhor.qualidade*100, score:melhor.score,
         taxaHistorica:desempenho.taxa, amostraHistorica:desempenho.amostra, taxaAjustada:desempenho.taxaAjustada,
-        descricao:`H2H como peso: ${confrontosVistos ? `${confrontosVistos} confronto(s)` : "sem confronto anterior"} · contexto ${Math.round(melhor.p*100)}% · média ${Math.round(melhor.global*100)}% · ${desempenho.amostra ? `mercado ${desempenho.taxa.toFixed(1)}% em ${desempenho.amostra}` : "mercado ainda formando amostra"} · ${apoio}.`
+        vantagemHistorica:histPp,
+        descricao:`${melhor.forca}: base ${Math.round(melhor.global*100)}% → contexto ${Math.round(melhor.p*100)}% (${vantagemPp>=0?"+":""}${vantagemPp.toFixed(1)} p.p.) · ${desempenho.amostra ? `este lado acertou ${desempenho.taxa.toFixed(1)}% em ${desempenho.amostra} chamada(s)` : "este lado ainda formando amostra"} · H2H ${confrontosVistos ? `${confrontosVistos}` : "0"} · ${apoio}.`
       });
     }
 
     candidatos.sort((a,b)=>
       b.score-a.score ||
+      b.ganho-a.ganho ||
       (Number(b.taxaAjustada)||0)-(Number(a.taxaAjustada)||0) ||
-      b.ganho-a.ganho || b.confianca-a.confianca
+      b.confianca-a.confianca
     );
     return {
       disponivel:true, amostra:hist.length, confrontos:confrontosVistos, faltamConfrontos:0, candidatos, mercados,
-      resumo:`IA ativa: confronto direto é apenas um dos pesos (${confrontosVistos} encontrado(s)). A decisão dá peso maior aos últimos 10 do mandante em casa e aos últimos 10 do visitante fora; o histórico completo nessas condições entra com peso menor. H2H, momento, horário, sequência e a taxa de acerto aprendida continuam participando na base limpa de ${hist.length} resultados.`
+      resumo:`IA ativa: cada lado é independente. A frequência normal do mercado não dá prioridade sozinha; o ranking procura vantagem sobre a própria taxa-base. Últimos 10 casa/fora têm peso maior, histórico amplo peso menor, e H2H, momento, horário, sequência e acerto individual completam a leitura em ${hist.length} resultados.`
     };
   }
 };

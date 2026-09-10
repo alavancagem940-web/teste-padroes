@@ -82,8 +82,8 @@ document.addEventListener("DOMContentLoaded", () => {
         try {
           await Sincronizacao.limparMemoriasAntigasRemotasUmaVez();
 
-          // A V3 é exclusiva desta base limpa. Se já existir em outro dispositivo,
-          // pode ser importada sem misturar V1/V2.
+          // A V4 separa cada mercado/lado. Se já existir em outro dispositivo,
+          // pode ser importada sem misturar a memória agregada antiga.
           try {
             const remota = await Sincronizacao.obterMemoriaAprendizado();
             if (remota && typeof Aprendizado !== "undefined") Aprendizado.importar(remota);

@@ -8,18 +8,30 @@
  * uma experiencia e salva a memoria, sem reconstruir 180 partidas.
  */
 const Aprendizado = {
-  VERSAO: "2026-09-09-BASE-LIMPA-H2H10-V2",
-  CHAVE_STORAGE: "esportes_virtuais_memoria_mercados_base_limpa_h2h10_v2",
+  VERSAO: "2026-09-10-MERCADOS-INDIVIDUAIS-V1",
+  CHAVE_STORAGE: "esportes_virtuais_memoria_mercados_individuais_v1",
   _resumo: {},
   _processados: new Set(),
   _iniciado: false,
   _aprendendo: false,
 
+  _idIndividual(k, valor) {
+    const mercado = String(k || "").trim();
+    const lado = String(valor ?? "").trim();
+    return `${mercado}:${lado}`;
+  },
+
   _clonarResumo(valor) {
     const saida = {};
     for (const [chave, bruto] of Object.entries(valor || {})) {
+      const primeiro = String(chave || "").split("|")[0] || "";
+      const partes = primeiro.split(":");
+      const k = String(bruto?.k || partes.shift() || "");
+      const ladoChave = partes.join(":");
       const item = {
-        k: String(bruto?.k || chave.split("|", 1)[0] || ""),
+        k,
+        valor: String(bruto?.valor ?? ladoChave ?? ""),
+        idIndividual: String(bruto?.idIndividual || this._idIndividual(k, bruto?.valor ?? ladoChave ?? "")),
         amostra: Math.max(0, Number(bruto?.amostra) || 0),
         acertos: Math.max(0, Number(bruto?.acertos) || 0),
         erros: Math.max(0, Number(bruto?.erros) || 0)
@@ -69,21 +81,44 @@ const Aprendizado = {
     };
   },
 
-  estatisticaMercado(k) {
+  estatisticaMercado(k, valor = null) {
     let amostra = 0, acertos = 0, erros = 0;
+    const filtrarLado = valor !== null && valor !== undefined && String(valor) !== "";
     for (const item of Object.values(this._resumo || {})) {
       if (String(item?.k || "") !== String(k || "")) continue;
+      if (filtrarLado && String(item?.valor ?? "") !== String(valor)) continue;
       amostra += Math.max(0, Number(item?.amostra) || 0);
       acertos += Math.max(0, Number(item?.acertos) || 0);
       erros += Math.max(0, Number(item?.erros) || 0);
     }
     const taxa = amostra ? acertos / amostra * 100 : 0;
-    // encolhe amostras pequenas para nao deixar 2/2 superar 30/35
+    // Beta(3,3): evita que 2/2 tenha mais peso que uma amostra grande.
     const taxaAjustada = amostra ? ((acertos + 3) / (amostra + 6)) * 100 : 50;
-    return { k, amostra, acertos, erros, taxa, taxaAjustada };
+    return {
+      k, valor: filtrarLado ? String(valor) : null,
+      idIndividual: filtrarLado ? this._idIndividual(k, valor) : String(k || ""),
+      amostra, acertos, erros, taxa, taxaAjustada
+    };
+  },
+
+  estatisticaIndividual(k, valor) {
+    return this.estatisticaMercado(k, valor);
+  },
+
+  rankingIndividuais(minAmostra = 3) {
+    const mapa = new Map();
+    for (const item of Object.values(this._resumo || {})) {
+      if (!item?.k || item?.valor === undefined || item?.valor === null || String(item.valor) === "") continue;
+      mapa.set(this._idIndividual(item.k, item.valor), [item.k, item.valor]);
+    }
+    return [...mapa.values()]
+      .map(([k, valor]) => this.estatisticaMercado(k, valor))
+      .filter(x => x.amostra >= Math.max(0, Number(minAmostra) || 0))
+      .sort((a,b) => b.taxaAjustada-a.taxaAjustada || b.amostra-a.amostra || b.taxa-a.taxa);
   },
 
   rankingMercados(minAmostra = 3) {
+    // Mantido por compatibilidade. Para as sugestões novas, use rankingIndividuais().
     const chaves = ["exato","gols","r12","bm","ou05","under05","ou15","ou25","ou35","over35"];
     return chaves.map(k => this.estatisticaMercado(k))
       .filter(x => x.amostra >= Math.max(0, Number(minAmostra) || 0))
@@ -113,8 +148,10 @@ const Aprendizado = {
     return n <= 1 ? "1" : n <= 3 ? "2-3" : n <= 6 ? "4-6" : "7+";
   },
   _chave(k, m) {
+    // O lado faz parte da identidade da memória. MAIS 1.5 e MENOS 1.5
+    // usam os mesmos dados-base, mas nunca compartilham taxa de acerto.
     return [
-      k,
+      this._idIndividual(k, m?.palpite?.valor),
       this._faixaPct(m?.palpite?.percentual),
       this._faixaOc(m?.padrao?.ocorrencias?.length),
       this._faixaTam(m?.padrao?.tamanho)
@@ -197,8 +234,11 @@ const Aprendizado = {
       const mercado = mercados[k];
       if (!mercado?.ativo || !mercado?.palpite || typeof avaliacao?.[k] !== "boolean") continue;
       const chave = this._chave(k, mercado);
+      const valor = String(mercado.palpite.valor ?? "");
       const item = this._resumo[chave] || (this._resumo[chave] = {
         k,
+        valor,
+        idIndividual: this._idIndividual(k, valor),
         amostra: 0,
         acertos: 0,
         erros: 0

@@ -5,12 +5,12 @@
  *
  * A abertura e as atualizacoes consultam somente os 10 resultados recentes.
  * Cada novo resultado continua sendo enviado individualmente e imediatamente.
- * A memoria consolidada dos mercados fica em um caminho separado e compacto.
+ * A memoria individual (mercado + lado) fica em um caminho separado e compacto.
  */
 const Sincronizacao = {
   DATABASE_URL: "https://projeto-padroes-default-rtdb.firebaseio.com",
   CAMINHO: "historico_compartilhado",
-  CAMINHO_MEMORIA: "memoria_mercados_v3_base_limpa_h2h10",
+  CAMINHO_MEMORIA: "memoria_mercados_v4_individuais",
   CAMINHOS_MEMORIA_ANTIGA: ["memoria_mercados_v1", "memoria_mercados_v2_base_zerada"],
   LIMITE_RESULTADOS: 10,
   LIMITE_BASE_APRENDIZADO: 500,
