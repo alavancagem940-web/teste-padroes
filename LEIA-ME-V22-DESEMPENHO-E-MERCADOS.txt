@@ -1,0 +1,13 @@
+VAI NA FÉ V22 — desempenho, escudos estáveis e mercados individuais
+
+Alterações no núcleo:
+- relógio atualiza visualmente a cada segundo sem recalcular toda a previsão; recálculo completo só em mudança real de dados/slot;
+- /proximas_partidas não força renderização a cada polling quando nada mudou;
+- polling da agenda reduzido para 1,5 s;
+- aprendizado V4 é processado em lote invisível e só publica/apresenta a contagem final de chamadas;
+- escudos usam cache persistente preferencial e deixam de ser recriados a cada tick;
+- títulos de mercado são individuais: Mais de 1.5, Menos de 1.5, Mais de 2.5, etc.;
+- U3.5 fica em cartão fixo, separado das 3 sugestões. Quando não há sinal, permanece visível como SEM CHAMADA;
+- O3.5 continua disputando normalmente uma das 3 sugestões;
+- O0.5 continua fora das sugestões;
+- a memória continua separada por mercado + lado e não foi zerada.

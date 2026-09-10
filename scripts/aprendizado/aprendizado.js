@@ -215,12 +215,15 @@ const Aprendizado = {
     return null;
   },
 
-  aprenderIndice(resultados, indice) {
+  aprenderIndice(resultados, indice, opcoes = null) {
     if (!Array.isArray(resultados) || indice <= 0 || indice >= resultados.length) return false;
     const alvo = resultados[indice];
     if (!alvo?.mandante || !alvo?.visitante || !alvo?._temporal?.data || !alvo?._temporal?.horario) return false;
+    const resumoDestino = opcoes?.resumo || this._resumo;
+    const processadosDestino = opcoes?.processados || this._processados;
+    const persistir = opcoes?.persistir !== false;
     const chaveResultado = this._chaveResultado(alvo);
-    if (!chaveResultado || this._processados.has(chaveResultado)) return false;
+    if (!chaveResultado || processadosDestino.has(chaveResultado)) return false;
 
     const anteriores = resultados.slice(0, indice);
     const mercados = Previsoes.gerar(
@@ -235,7 +238,7 @@ const Aprendizado = {
       if (!mercado?.ativo || !mercado?.palpite || typeof avaliacao?.[k] !== "boolean") continue;
       const chave = this._chave(k, mercado);
       const valor = String(mercado.palpite.valor ?? "");
-      const item = this._resumo[chave] || (this._resumo[chave] = {
+      const item = resumoDestino[chave] || (resumoDestino[chave] = {
         k,
         valor,
         idIndividual: this._idIndividual(k, valor),
@@ -248,10 +251,12 @@ const Aprendizado = {
       else item.erros++;
     }
 
-    this._processados.add(chaveResultado);
-    this._salvarLocal();
-    if (typeof Sincronizacao !== "undefined" && Sincronizacao.publicarMemoriaAprendizado) {
-      Sincronizacao.publicarMemoriaAprendizado(this.exportar());
+    processadosDestino.add(chaveResultado);
+    if (persistir) {
+      this._salvarLocal();
+      if (typeof Sincronizacao !== "undefined" && Sincronizacao.publicarMemoriaAprendizado) {
+        Sincronizacao.publicarMemoriaAprendizado(this.exportar());
+      }
     }
     return true;
   },
@@ -267,19 +272,45 @@ const Aprendizado = {
       if (typeof aoConcluir === "function") { try { aoConcluir(); } catch (_) {} }
       return false;
     }
+
+    // Aprende em uma cópia invisível. A interface continua vendo somente a
+    // última memória COMPLETA; assim "chamadas" não sobe 0,1,2... na tela.
+    // Ao terminar, troca tudo de uma vez e publica somente um pacote no Firebase.
     this._aprendendo = true;
-    const proximo = () => {
-      const indice = indices.shift();
-      if (indice == null) {
-        this._aprendendo = false;
-        if (typeof aoConcluir === "function") { try { aoConcluir(); } catch (_) {} }
-        return;
+    const resumoTrabalho = this._clonarResumo(this._resumo);
+    const processadosTrabalho = new Set(this._processados);
+    let pos = 0;
+    const LOTE = 24;
+
+    const concluir = () => {
+      this._resumo = resumoTrabalho;
+      this._processados = processadosTrabalho;
+      this._aprendendo = false;
+      this._salvarLocal();
+      if (typeof Sincronizacao !== "undefined" && Sincronizacao.publicarMemoriaAprendizado) {
+        Sincronizacao.publicarMemoriaAprendizado(this.exportar());
       }
-      try { this.aprenderIndice(resultados, indice); }
-      catch (e) { console.warn("Falha ao aprender resultado novo:", e); }
-      setTimeout(proximo, 20);
+      if (typeof aoConcluir === "function") { try { aoConcluir(); } catch (_) {} }
     };
-    setTimeout(proximo, 20);
+
+    const proximo = () => {
+      const fim = Math.min(indices.length, pos + LOTE);
+      try {
+        for (; pos < fim; pos++) {
+          this.aprenderIndice(resultados, indices[pos], {
+            resumo: resumoTrabalho,
+            processados: processadosTrabalho,
+            persistir: false
+          });
+        }
+      } catch (e) {
+        console.warn("Falha ao aprender lote de resultados:", e);
+      }
+      if (pos < indices.length) setTimeout(proximo, 0);
+      else concluir();
+    };
+
+    setTimeout(proximo, 0);
     return true;
   }
 };

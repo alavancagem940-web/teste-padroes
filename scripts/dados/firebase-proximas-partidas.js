@@ -17,7 +17,7 @@ const TesteProximasPartidas = {
   CHAVE_AGENDA_CACHE: "vai_na_fe_agenda_coletor_base_zerada_v1",
   PADRAO: { caminhoPartidas: "proximas_partidas" },
   TIMEOUT_MS: 4500,
-  INTERVALO_MS: 2500,
+  INTERVALO_MS: 1500,
   _partidas: new Map(),
   _partidasRemotas: new Map(),
   _status: "aguardando",
@@ -382,6 +382,8 @@ const TesteProximasPartidas = {
 
   async carregarAgora() {
     if (!this.configurada() || this._carregando) return false;
+    const statusAnterior = this._status;
+    const erroAnterior = this._erro;
     this._carregando = true;
     this._status = "carregando";
     this._erro = "";
@@ -389,13 +391,14 @@ const TesteProximasPartidas = {
     try {
       const bruto = await this._fetchJSON(this._url());
       const mudou = this._absorver(bruto);
-      deveEmitir = mudou || this._status !== "online";
+      deveEmitir = mudou || statusAnterior !== "online";
       this._status = "online";
       return true;
     } catch (e) {
-      deveEmitir = this._status !== "erro" || this._erro !== String(e?.message || e);
+      const erroNovo = String(e?.message || e);
+      deveEmitir = statusAnterior !== "erro" || erroAnterior !== erroNovo;
       this._status = "erro";
-      this._erro = String(e?.message || e);
+      this._erro = erroNovo;
       console.warn("Próximas partidas indisponíveis no Firebase de teste:", e);
       return false;
     } finally {

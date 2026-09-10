@@ -89,35 +89,38 @@
     return String(pick.mercado || pick.nome || pick.valor || AGUARDA);
   };
 
-  // Na tela de Entradas, sempre mostra o NOME DO MERCADO junto com o lado indicado.
-  // Ex.: "Over / Under 2.5 — Menos de 2.5", em vez de exibir apenas "MENOS".
+  // Na tela de Entradas, cada LADO aparece como mercado individual.
+  // Ex.: "Mais de 1.5" e "Menos de 1.5" nunca aparecem como um único O/U.
   Interface._rotuloEntradaMercadoTeste = function (k, mercado) {
     if (!(mercado?.ativo && mercado?.palpite)) return AGUARDA;
-    const valor = String(mercado.palpite.valor ?? "").trim();
-    const maisMenos = linha => valor === "MAIS" ? `Mais de ${linha}` : valor === "MENOS" ? `Menos de ${linha}` : valor;
-    const nomes = {
-      exato: ["Placar Exato", valor],
-      gols: ["Total de Gols", valor ? `${valor} gols` : valor],
-      r12: ["Resultado 1X2", this._rotuloMercado(k, mercado)],
-      bm: ["Ambos Marcam", valor],
-      ou05: ["Over / Under 0.5", maisMenos("0.5")],
-      under05: ["Under 0.5", valor === "MENOS" ? "Menos de 0.5" : valor],
-      ou15: ["Over / Under 1.5", maisMenos("1.5")],
-      ou25: ["Over / Under 2.5", maisMenos("2.5")],
-      ou35: ["Over / Under 3.5", maisMenos("3.5")],
-      over35: ["Over 3.5", valor === "MAIS" ? "Mais de 3.5" : valor]
-    };
-    const item = nomes[k];
-    if (!item) {
-      const rotulo = this._rotuloMercado(k, mercado);
-      return rotulo && rotulo !== AGUARDA ? rotulo : valor || AGUARDA;
-    }
-    return item[1] ? `${item[0]} — ${item[1]}` : item[0];
+    const valor = String(mercado.palpite.valor ?? "").trim().toUpperCase();
+    if (k === "ou15") return valor === "MAIS" ? "Mais de 1.5" : "Menos de 1.5";
+    if (k === "ou25") return valor === "MAIS" ? "Mais de 2.5" : "Menos de 2.5";
+    if (k === "ou35") return valor === "MAIS" ? "Mais de 3.5" : "Menos de 3.5";
+    if (k === "over35") return "Mais de 3.5";
+    if (k === "under05") return "Menos de 0.5";
+    if (k === "ou05") return valor === "MAIS" ? "Mais de 0.5" : "Menos de 0.5";
+    if (k === "bm") return valor === "SIM" ? "Ambos Marcam — SIM" : "Ambos Marcam — NÃO";
+    if (k === "r12") return valor === "1" ? "Mandante vence" : valor === "2" ? "Visitante vence" : "Empate";
+    if (k === "gols") return `Total de Gols — ${valor === "5" ? "5+" : valor} gols`;
+    if (k === "exato") return `Placar Exato — ${String(mercado.palpite.valor ?? "")}`;
+    return this._rotuloMercado(k, mercado) || String(mercado.palpite.valor ?? AGUARDA);
   };
 
   // O Over 0.5 continua sendo calculado pelos especialistas, mas não pode
   // aparecer como sugestão de entrada porque a odd costuma ser baixa demais.
   // Under 0.5 continua liberado normalmente.
+  Interface._tituloIndividualSugestaoTeste = function (s) {
+    if (!s) return AGUARDA;
+    const k = String(s.k || s.mercado || "");
+    const valor = s.valor ?? s.palpite?.valor ?? "";
+    if (k) {
+      const titulo = this._rotuloEntradaMercadoTeste(k, {ativo:true, palpite:{valor}});
+      if (titulo && titulo !== AGUARDA) return titulo;
+    }
+    return String(s.titulo || s.nome || AGUARDA);
+  };
+
   Interface._ehOver05SugestaoTeste = function (s) {
     if (!s) return false;
     const k = String(s.mercado ?? s.k ?? "").trim();
@@ -143,6 +146,18 @@
     return (Array.isArray(lista) ? lista : []).filter(x =>
       !this._ehOver05SugestaoTeste(x) && !this._ehUnder35FixoSugestaoTeste(x)
     );
+  };
+
+  Interface._under35FixoTeste = function (d) {
+    const m = d?.mercados?.ou35 || null;
+    const valor = String(m?.palpite?.valor ?? "").toUpperCase();
+    const ativo = Boolean(m?.ativo && m?.palpite && valor === "MENOS" && !m?.bloqueado);
+    const confianca = ativo ? (num(m?.palpite?.percentual) ?? 0) : null;
+    let descricao = "Fica sempre visível e não ocupa nenhuma das 3 sugestões.";
+    if (ativo) descricao = `Sinal ativo para Menos de 3.5${confianca !== null ? ` · confiança ${Math.round(confianca)}%` : ""}.`;
+    else if (m?.bloqueado && m?.motivoBloqueio) descricao = `Sem chamada agora · ${m.motivoBloqueio}.`;
+    else descricao = "Sem chamada agora · o especialista U3.5 permanece visível e aguarda um contexto melhor.";
+    return { ativo, titulo:"Menos de 3.5", confianca, descricao, status: ativo ? "ACIONADO" : "SEM CHAMADA" };
   };
 
   Interface._sugestoesEntradasTeste = function (d, meta) {
@@ -261,7 +276,7 @@
       visitante: meta?.visitante || "",
       liga: meta?.liga || "Inglês Doméstico (Esportes Virtuais)",
       sugestoes: this._filtrarSugestoesTeste(sugestoes).slice(0, 3).map((x, i) => ({
-        titulo: x.titulo || AGUARDA,
+        titulo: this._tituloIndividualSugestaoTeste(x),
         descricao: x.descricao || "",
         confianca: num(x.confianca),
         principal: i === 0,
@@ -462,16 +477,17 @@
   Interface._fontesEscudoTeste = function (nome) {
     const id = this._escudoIdTeste(nome);
     if (!id) return [];
-    if (this._fontesEscudoFixasTeste.has(id)) return [...this._fontesEscudoFixasTeste.get(id)];
+    const cachePronto = typeof TesteEscudosCache !== "undefined" && TesteEscudosCache.tem(id);
+    if (this._fontesEscudoFixasTeste.has(id)) {
+      const fixas = [...this._fontesEscudoFixasTeste.get(id)];
+      return cachePronto ? [TesteEscudosCache.url(id), ...fixas.filter(x => x !== TesteEscudosCache.url(id))] : fixas;
+    }
 
     // Estes são os PNGs que realmente existem fisicamente dentro da pasta
     // teste/escudos. Para os demais NÃO tentamos arquivo local inexistente,
     // evitando o ícone de arquivo quebrado/piscando.
     const idsLocais = new Set([42, 44, 47, 48, 49, 50, 52, 63, 71]);
     const fontes = [];
-    if (!idsLocais.has(id) && typeof TesteEscudosCache !== "undefined" && TesteEscudosCache.tem(id)) {
-      fontes.push(TesteEscudosCache.url(id));
-    }
     if (idsLocais.has(id)) fontes.push(`./escudos/${id}.png`);
 
     const n = String(nome || "").trim().toLowerCase();
@@ -497,7 +513,7 @@
 
     const unicas = [...new Set(fontes)];
     this._fontesEscudoFixasTeste.set(id, unicas);
-    return [...unicas];
+    return cachePronto ? [TesteEscudosCache.url(id), ...unicas.filter(x => x !== TesteEscudosCache.url(id))] : [...unicas];
   };
 
   Interface._trocarFonteEscudoTeste = function (img) {
@@ -765,7 +781,7 @@
       const status = acertou === true ? `<em class="teste-status green">GREEN</em>` : acertou === false ? `<em class="teste-status red">RED</em>` : `<em class="teste-status neutro">REGISTRADA</em>`;
       return `<div class="teste-suggestion-row">
         <span class="teste-suggestion-number">${i + 1}</span>
-        <div><b>${esc(s.titulo)}</b>${s.descricao ? `<small>${esc(s.descricao)}</small>` : ""}</div>
+        <div><b>${esc(this._tituloIndividualSugestaoTeste(s))}</b>${s.descricao ? `<small>${esc(s.descricao)}</small>` : ""}</div>
         <div class="teste-conf"><small>CONFIANÇA</small><b>${pct(s.confianca)}</b></div>
         ${status}
       </div>`;
@@ -785,10 +801,10 @@
         <div class="teste-team teste-team-side">${this._brasaoTeste(meta?.escudoVisitante, visitante, "Visitante")}<b>${esc(visitante)}</b></div>
       </div>
       <div class="teste-best-market">
-        <div class="teste-best-title"><span>▥</span><div><small>MERCADO MAIS INDICADO NAQUELE JOGO</small><b>${esc(principal?.titulo || AGUARDA)}</b><p>${esc(principal?.descricao || hist.origem || "Sem sugestão registrada.")}</p></div></div>
+        <div class="teste-best-title"><span>▥</span><div><small>MERCADO MAIS INDICADO NAQUELE JOGO</small><b>${esc(principal ? this._tituloIndividualSugestaoTeste(principal) : AGUARDA)}</b><p>${esc(principal?.descricao || hist.origem || "Sem sugestão registrada.")}</p></div></div>
         <div class="teste-best-metrics"><div><small>CONFIANÇA</small><b>${pct(principal?.confianca)}</b></div></div>
       </div>
-      <div class="teste-section-title">ENTRADAS SUGERIDAS PELOS ESPECIALISTAS NAQUELE JOGO (${sugestoes.length})</div>
+      <div class="teste-section-title">SUGESTÕES DOS ESPECIALISTAS NAQUELE JOGO (${sugestoes.length})</div>
       <div class="teste-suggestion-list">${sugestoesHtml}</div>
       <div class="teste-analysis"><b>▤ REGISTRO DA ANÁLISE</b><p>${esc(hist.origem || "Sugestões anteriores ao resultado.")}. O Over 0.5 continua sendo calculado internamente, mas não aparece entre as sugestões.</p></div>
       <div class="teste-bottom-details teste-bottom-form">
@@ -853,7 +869,7 @@
         <div class="teste-row-time"><span>${labels[i] || "PRÓXIMO JOGO"}</span><b>${esc(slot.horario)}</b></div>
         <div class="teste-league"><i>⚽</i><small>${esc(meta?.liga || "Inglês Doméstico (Esportes Virtuais)")}</small></div>
         <div class="teste-teams-line">${this._nomePartidaTeste(meta)}</div>
-        <div class="teste-count"><b>${Number.isFinite(Number(qtd)) ? Number(qtd) : "—"}</b><small>entradas</small></div>
+        <div class="teste-count"><b>${Number.isFinite(Number(qtd)) ? Number(qtd) : "—"}</b><small>sugestões</small></div>
         <span class="teste-chevron">›</span>
       </button>`;
     }).join("");
@@ -871,9 +887,11 @@
           ? ctxAtual.resumo
           : (principal?.descricao || "Calculando os mercados com todos os fatores disponíveis; H2H é apenas um dos pesos."));
       const forma = this._ultimosCasaVisitanteTeste(d.resultados || [], metaSelecionado, 10);
+      const under35Fixo = this._under35FixoTeste(d);
+      const under35FixoHtml = `<div class="teste-under35-fixo ${under35Fixo.ativo ? "ativo" : "silencioso"}"><div><small>U3.5 FIXO · FORA DAS 3 SUGESTÕES</small><b>${esc(under35Fixo.titulo)}</b><p>${esc(under35Fixo.descricao)}</p></div><div class="teste-under35-status"><span>${esc(under35Fixo.status)}</span><b>${under35Fixo.ativo ? pct(under35Fixo.confianca) : "—"}</b></div></div>`;
       const sugestoesHtml = sugestoes.length ? sugestoes.map((s, i) => `<div class="teste-suggestion-row">
         <span class="teste-suggestion-number">${i + 1}</span>
-        <div><b>${esc(s.titulo)}</b>${s.descricao ? `<small>${esc(s.descricao)}</small>` : ""}</div>
+        <div><b>${esc(this._tituloIndividualSugestaoTeste(s))}</b>${s.descricao ? `<small>${esc(s.descricao)}</small>` : ""}</div>
         <div class="teste-conf"><small>CONFIANÇA</small><b>${pct(s.confianca)}</b></div>
         <em class="${s.principal ? "principal" : "alternativa"}">${s.principal ? "PRINCIPAL" : "ALTERNATIVA"}${s.forca ? ` · ${esc(s.forca)}` : ""}</em>
       </div>`).join("") : `<div class="teste-empty">${AGUARDA}</div>`;
@@ -890,10 +908,11 @@
           <div class="teste-team teste-team-side">${this._brasaoTeste(metaSelecionado?.escudoVisitante, visitante, "Visitante")}<b>${esc(visitante)}</b></div>
         </div>
         <div class="teste-best-market">
-          <div class="teste-best-title"><span>▥</span><div><small>MERCADO MAIS INDICADO (IA)</small><b>${esc(principal?.titulo || AGUARDA)}</b><p>${esc(principal?.descricao || "Calculando o melhor mercado da base limpa. O confronto direto entra como peso, sem bloquear a análise.")}</p></div></div>
+          <div class="teste-best-title"><span>▥</span><div><small>MERCADO MAIS INDICADO (IA)</small><b>${esc(principal ? this._tituloIndividualSugestaoTeste(principal) : AGUARDA)}</b><p>${esc(principal?.descricao || "Calculando o melhor mercado da base limpa. O confronto direto entra como peso, sem bloquear a análise.")}</p></div></div>
           <div class="teste-best-metrics"><div><small>CONFIANÇA</small><b>${pct(principal?.confianca)}</b></div></div>
         </div>
-        <div class="teste-section-title">ENTRADAS SUGERIDAS PELOS ESPECIALISTAS (${sugestoes.length})</div>
+        ${under35FixoHtml}
+        <div class="teste-section-title">3 SUGESTÕES DOS ESPECIALISTAS (${sugestoes.length})</div>
         <div class="teste-suggestion-list">${sugestoesHtml}</div>
         <div class="teste-analysis"><b>▤ ANÁLISE DA IA</b><p>${esc(analise)}</p></div>
         <div class="teste-bottom-details teste-bottom-form">
@@ -973,7 +992,7 @@
       .teste-details{padding:10px;min-height:535px}.teste-detail-head{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #142842;padding:0 0 8px}.teste-detail-head h2{margin:0!important;font-size:13px!important}.teste-detail-head span{font-size:8px;padding:4px 7px;border-radius:3px;background:#5d157a;color:#f5c8ff}.teste-league-title{text-align:center;color:#a8b4c9;font-size:9px;padding:8px 0 3px}
       .teste-match-hero{display:grid;grid-template-columns:1fr 110px 1fr;align-items:center;gap:8px;padding:2px 0 9px}.teste-team{display:flex;flex-direction:column;align-items:center;gap:4px;text-align:center}.teste-team.teste-team-side{flex-direction:row;justify-content:center;gap:8px}.teste-team b{font-size:11px;max-width:140px;overflow-wrap:anywhere}.teste-team-logo{width:42px;height:42px;object-fit:contain;flex:0 0 auto}.teste-team-logo.mini{width:20px;height:20px}.teste-team-missing{display:inline-grid;place-items:center;border-radius:50%;border:1px solid #28415f;background:#0a1728;color:#91a8c7;font-size:8px;font-weight:800}.teste-kickoff{text-align:center;display:flex;flex-direction:column;align-items:center}.teste-kickoff b{font-size:22px}.teste-kickoff small{font-size:8px;color:#8fa0bc}.teste-kickoff span{font-size:11px;color:#6d7e9b;margin-top:2px}
       .teste-best-market{display:grid;grid-template-columns:1fr 155px;gap:10px;border:1px solid #0d4a39;background:linear-gradient(90deg,#042d24,#071929);border-radius:6px;padding:8px 10px}.teste-best-title{display:flex;gap:10px;align-items:center}.teste-best-title>span{font-size:25px;color:#00df94}.teste-best-title small{display:block;color:#aab8ca;font-size:8px}.teste-best-title b{display:block;font-size:15px;margin-top:2px}.teste-best-title p{margin:2px 0 0;color:#9ab1b8;font-size:8px}.teste-best-metrics{display:grid;grid-template-columns:1fr;align-items:center}.teste-best-metrics div{text-align:center;border-left:1px solid #14523f}.teste-best-metrics small{display:block;font-size:7px;color:#93a5b8}.teste-best-metrics b{font-size:16px}
-      .teste-section-title{font-size:9px;font-weight:800;margin:9px 0 4px;color:#cbd5e6}.teste-suggestion-list{border-top:1px solid #14253c}.teste-suggestion-row{display:grid;grid-template-columns:26px minmax(220px,1fr) 70px 108px;gap:7px;align-items:center;padding:7px 5px;border-bottom:1px solid #14253c}.teste-suggestion-number{width:20px;height:20px;border-radius:50%;display:grid;place-items:center;background:#0d2749;color:#c3d8ff;font-size:9px}.teste-suggestion-row>div:nth-child(2){display:flex;flex-direction:column}.teste-suggestion-row>div:nth-child(2) b{font-size:10px}.teste-suggestion-row>div:nth-child(2) small{font-size:8px;color:#8293ae}.teste-conf{text-align:center}.teste-conf small{display:block;font-size:6px;color:#7f90aa}.teste-conf b{font-size:11px}.teste-suggestion-row em{font-style:normal;font-size:7px;text-align:center;padding:4px;border-radius:3px}.teste-suggestion-row em.principal{color:#63ffbc;background:#064f38;border:1px solid #0c865e}.teste-suggestion-row em.alternativa{color:#72bcff;background:#082d52;border:1px solid #0c5793}
+      .teste-under35-fixo{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center;margin-top:8px;padding:8px 10px;border:1px solid #24445f;border-radius:6px;background:#071829}.teste-under35-fixo.ativo{border-color:#0b7652;background:#05261f}.teste-under35-fixo>div:first-child{min-width:0}.teste-under35-fixo small{display:block;font-size:7px;color:#8fa6be}.teste-under35-fixo b{display:block;font-size:12px;margin-top:2px}.teste-under35-fixo p{margin:2px 0 0;font-size:8px;color:#8fa6be}.teste-under35-status{text-align:right;min-width:72px}.teste-under35-status span{display:block;font-size:7px;color:#7eb6e8}.teste-under35-fixo.ativo .teste-under35-status span{color:#58e6ad}.teste-under35-status b{font-size:13px}.teste-section-title{font-size:9px;font-weight:800;margin:9px 0 4px;color:#cbd5e6}.teste-suggestion-list{border-top:1px solid #14253c}.teste-suggestion-row{display:grid;grid-template-columns:26px minmax(220px,1fr) 70px 108px;gap:7px;align-items:center;padding:7px 5px;border-bottom:1px solid #14253c}.teste-suggestion-number{width:20px;height:20px;border-radius:50%;display:grid;place-items:center;background:#0d2749;color:#c3d8ff;font-size:9px}.teste-suggestion-row>div:nth-child(2){display:flex;flex-direction:column}.teste-suggestion-row>div:nth-child(2) b{font-size:10px}.teste-suggestion-row>div:nth-child(2) small{font-size:8px;color:#8293ae}.teste-conf{text-align:center}.teste-conf small{display:block;font-size:6px;color:#7f90aa}.teste-conf b{font-size:11px}.teste-suggestion-row em{font-style:normal;font-size:7px;text-align:center;padding:4px;border-radius:3px}.teste-suggestion-row em.principal{color:#63ffbc;background:#064f38;border:1px solid #0c865e}.teste-suggestion-row em.alternativa{color:#72bcff;background:#082d52;border:1px solid #0c5793}
       .teste-analysis{border:1px solid #8422bd;background:linear-gradient(90deg,#22083b,#10091f);border-radius:6px;padding:8px 10px;margin-top:8px}.teste-analysis b{font-size:9px;color:#fb3cff}.teste-analysis p{font-size:9px;line-height:1.45;color:#c7b9da;margin:4px 0 0}.teste-bottom-details{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:8px}.teste-bottom-details>div{border:1px solid #172943;border-radius:6px;padding:7px}.teste-bottom-details h3{font-size:8px;margin:0 0 6px}.teste-recent-scores{display:flex;gap:4px;flex-wrap:wrap}.teste-score-chip{font-size:9px;font-weight:800;padding:5px 8px;border-radius:4px;background:#0b3d28;color:#70ff9d;border:1px solid #155c3c}.teste-bottom-form .teste-h2h-box{grid-column:1/-1}.teste-form-head{display:grid;grid-template-columns:1fr auto;gap:2px 8px;align-items:center;margin-bottom:5px}.teste-form-head h3{grid-column:1/-1;margin-bottom:2px!important}.teste-form-head b{font-size:9px;color:#e7effc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.teste-form-head span{font-size:7px;font-weight:900;color:#8da2bb;border:1px solid #223752;border-radius:999px;padding:2px 5px}.teste-form-list{display:grid;gap:2px}.teste-form-row{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);align-items:center;gap:6px;padding:5px 1px;border-bottom:1px solid #14243a}.teste-form-row:last-child{border-bottom:0}.teste-form-time{font-size:7px;font-weight:700;color:#aebed1;white-space:normal;line-height:1.2}.teste-form-time.casa{text-align:right}.teste-form-time.fora{text-align:left}.teste-form-time.alvo{color:#eef7ff;font-weight:900}.teste-form-score{min-width:38px;text-align:center;font-size:8px;color:#78f6ac}.teste-form-row small{grid-column:1/-1;text-align:center;color:#60758e;font-size:6px;margin-top:-2px}.teste-form-empty{font-size:7px;color:#8e7aa9;padding:6px 1px;line-height:1.35}.teste-h2h{display:grid;gap:3px}.teste-h2h-row{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);align-items:center;gap:7px;font-size:8px;padding:6px 2px;border-bottom:1px solid #172943}.teste-h2h-row .teste-h2h-time{font-weight:800;color:#d7e5f7;white-space:normal}.teste-h2h-row .teste-h2h-time.casa{text-align:right}.teste-h2h-row .teste-h2h-time.fora{text-align:left}.teste-h2h-row .teste-h2h-score{min-width:42px;text-align:center;color:#78f6ac;font-size:9px}.teste-h2h-row small{grid-column:1/-1;text-align:center;color:#647991;font-size:6px;margin-top:-2px}.teste-h2h-row.vazio{grid-template-columns:1fr;color:#8e7aa9}.teste-h2h-row.vazio span{text-align:left}.teste-empty{text-align:center;color:#8f7aa9;padding:14px}
       .teste-no-upcoming,.teste-no-selection{min-height:120px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:5px;text-align:center;color:#b9c7da;padding:22px}.teste-no-upcoming b,.teste-no-selection b{font-size:14px;color:#d8e4f5}.teste-no-upcoming small,.teste-no-selection small{font-size:9px;color:#7f91aa}.teste-details-empty{min-height:300px}
       .teste-firebase-setting input{background:#061326;color:white;border:1px solid #16528c;border-radius:5px;padding:7px;min-width:260px}.teste-url-readonly{font-size:9px;max-width:360px;overflow-wrap:anywhere;text-align:right}.teste-fb-status{display:block;padding:8px;color:#9eb0c7}.teste-fb-status.online{color:#24e999}.teste-fb-status.erro{color:#ff6371}

@@ -290,12 +290,17 @@ const AnaliseContextualTimes = {
   },
 
   _rotulo(k, valor) {
-    if (k === "bm") return `Ambos Marcam — ${valor}`;
-    if (k === "r12") return `Resultado 1X2 — ${valor === "1" ? "Mandante" : valor === "2" ? "Visitante" : "Empate"}`;
-    if (k === "gols") return `Total de Gols — ${valor === "5" ? "5+ gols" : `${valor} gols`}`;
+    const v = String(valor ?? "").toUpperCase();
+    if (k === "bm") return v === "SIM" ? "Ambos Marcam — SIM" : "Ambos Marcam — NÃO";
+    if (k === "r12") return v === "1" ? "Mandante vence" : v === "2" ? "Visitante vence" : "Empate";
+    if (k === "gols") return `Total de Gols — ${v === "5" ? "5+ gols" : `${valor} gols`}`;
     if (k === "exato") return `Placar Exato — ${valor}`;
-    const linha = ({ou05:"0.5",under05:"0.5",ou15:"1.5",ou25:"2.5",ou35:"3.5",over35:"3.5"})[k];
-    if (linha) return `${k === "under05" ? "Under 0.5" : k === "over35" ? "Over 3.5" : `Over / Under ${linha}`} — ${valor === "MAIS" ? `Mais de ${linha}` : `Menos de ${linha}`}`;
+    if (k === "ou15") return v === "MAIS" ? "Mais de 1.5" : "Menos de 1.5";
+    if (k === "ou25") return v === "MAIS" ? "Mais de 2.5" : "Menos de 2.5";
+    if (k === "ou35") return v === "MAIS" ? "Mais de 3.5" : "Menos de 3.5";
+    if (k === "over35") return "Mais de 3.5";
+    if (k === "under05") return "Menos de 0.5";
+    if (k === "ou05") return v === "MAIS" ? "Mais de 0.5" : "Menos de 0.5";
     return `${k} — ${valor}`;
   },
 

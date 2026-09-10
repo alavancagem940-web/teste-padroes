@@ -36,7 +36,7 @@ const Interface = {
             </div>
           </section>
         </div>`;
-        this.eventos(); if(typeof RelogioPartidas!=='undefined'){ RelogioPartidas.iniciar(); RelogioPartidas.observar(()=>this.atualizar()); } this.atualizar(); console.log('Interface iniciada.');
+        this.eventos(); if(typeof RelogioPartidas!=='undefined'){ RelogioPartidas.iniciar(); RelogioPartidas.observar(()=>this.tickRelogioLeve()); } this.atualizar(); console.log('Interface iniciada.');
     },
     eventos(){
         const container=document.getElementById('botoes-resultados');
@@ -183,6 +183,22 @@ const Interface = {
                     : janelaRegistro
                         ? `🟢 <b>Registro liberado</b> para a partida <b>${partidaResultado.horario}</b> · faltam <b>${fmt(restante)}</b> para a próxima partida <b>${proxima.horario}</b>`
                         : `🔒 <b>Registro bloqueado</b> · será liberado às <b>${horarioLiberacao}</b> (faltam <b>${fmt(segundosAteLiberar)}</b>) · próxima partida: <b>${proxima.horario}</b>`;
+        }
+    },
+    tickRelogioLeve(){
+        if(typeof RelogioPartidas==='undefined') return;
+        const a=RelogioPartidas.agora(), atual=RelogioPartidas.partidaAtual(), n=RelogioPartidas.proximaPartida();
+        const hora=document.getElementById('hora-atual'), el=document.getElementById('relogio-partidas'), ph=document.getElementById('proximo-horario');
+        if(hora) hora.innerHTML=`🕒 Hora em Londres: <b>${String(a.hour).padStart(2,'0')}:${String(a.minute).padStart(2,'0')}:${String(a.second).padStart(2,'0')}</b>`;
+        if(el) el.innerHTML=`⚽ Horário da partida atual: <b>${atual.horario}</b> · <b>Próximo jogo: ${n.horario}</b>`;
+        if(ph) ph.textContent=n.horario;
+        if(typeof this._atualizarRelogioModerno==='function') this._atualizarRelogioModerno({agora:a,atual,proxima:n});
+        this.atualizarEstadoBotoes();
+        const assinatura=`${atual?.data||''}|${atual?.horario||''}|${n?.data||''}|${n?.horario||''}`;
+        if(this._ultimoSlotTickLeve==null){ this._ultimoSlotTickLeve=assinatura; return; }
+        if(this._ultimoSlotTickLeve!==assinatura){
+            this._ultimoSlotTickLeve=assinatura;
+            this.atualizar();
         }
     },
     status(ok){return ok?'<span class="green">✓ GREEN</span>':'<span class="red">✕ RED</span>';},

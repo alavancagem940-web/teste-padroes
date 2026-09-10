@@ -10,6 +10,7 @@
 window.TesteEscudosCache = {
   CACHE: "vai-na-fe-escudos-v1",
   PREFIXO: "vai_na_fe_escudo_visto_",
+  _prontos: new Set(),
 
   iniciar() {
     // O service-worker principal do núcleo já trata ./escudos/cache/*.png.
@@ -23,7 +24,8 @@ window.TesteEscudosCache = {
 
   tem(id) {
     try {
-      return Boolean(navigator.serviceWorker?.controller) && localStorage.getItem(`${this.PREFIXO}${Number(id)}`) === "1";
+      const n = Number(id);
+      return this._prontos.has(n) || (Boolean(navigator.serviceWorker?.controller) && localStorage.getItem(`${this.PREFIXO}${n}`) === "1");
     } catch (_) {
       return false;
     }
@@ -47,6 +49,7 @@ window.TesteEscudosCache = {
       const cache = await caches.open(this.CACHE);
       const alvo = new Request(new URL(this.url(id), location.href).href, { method: "GET" });
       await cache.put(alvo, resposta.clone());
+      this._prontos.add(id);
       localStorage.setItem(`${this.PREFIXO}${id}`, "1");
     } catch (_) {
       // Falha de cache não interfere na exibição normal do escudo.
