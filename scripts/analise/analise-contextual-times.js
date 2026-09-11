@@ -363,6 +363,92 @@ const AnaliseContextualTimes = {
     return `${k} — ${valor}`;
   },
 
+
+  _estatFormaCondicao(lista, time, lado) {
+    const alvo = this._normTime(time);
+    let n=0, v=0, e=0, d=0, gf=0, ga=0, marcou=0, clean=0, o15=0, o25=0, o35=0, btts=0;
+    for (const x of lista || []) {
+      const p = this._placar(x);
+      if (!p) continue;
+      const ehCasa = this._normTime(x?._ctxMandante || x?.mandante) === alvo;
+      const ehFora = this._normTime(x?._ctxVisitante || x?.visitante) === alvo;
+      if ((lado === "casa" && !ehCasa) || (lado === "fora" && !ehFora)) continue;
+      const pro = ehCasa ? p.casa : p.fora;
+      const contra = ehCasa ? p.fora : p.casa;
+      n++; gf += pro; ga += contra;
+      if (pro > contra) v++; else if (pro === contra) e++; else d++;
+      if (pro > 0) marcou++;
+      if (contra === 0) clean++;
+      if (p.total > 1) o15++;
+      if (p.total > 2) o25++;
+      if (p.total > 3) o35++;
+      if (p.casa > 0 && p.fora > 0) btts++;
+    }
+    const pct = x => n ? (x/n)*100 : 0;
+    return {n,v,e,d,gf,ga,mediaGF:n?gf/n:0,mediaGA:n?ga/n:0,ppg:n?(v*3+e)/n:0,marcou:pct(marcou),clean:pct(clean),o15:pct(o15),o25:pct(o25),o35:pct(o35),btts:pct(btts)};
+  },
+
+  _estatH2H(lista, mandante, visitante) {
+    const casaAlvo=this._normTime(mandante), foraAlvo=this._normTime(visitante);
+    let n=0, casaV=0, emp=0, foraV=0, gols=0, btts=0, o25=0;
+    for (const x of lista || []) {
+      const p=this._placar(x); if(!p) continue;
+      const m=this._normTime(x?._ctxMandante || x?.mandante), v=this._normTime(x?._ctxVisitante || x?.visitante);
+      const direto=m===casaAlvo && v===foraAlvo, invertido=m===foraAlvo && v===casaAlvo;
+      if(!direto && !invertido) continue;
+      const gCasaAtual=direto?p.casa:p.fora, gForaAtual=direto?p.fora:p.casa;
+      n++; gols+=p.total; if(p.casa>0&&p.fora>0)btts++; if(p.total>2)o25++;
+      if(gCasaAtual>gForaAtual)casaV++; else if(gCasaAtual===gForaAtual)emp++; else foraV++;
+    }
+    return {n,casaV,emp,foraV,mediaGols:n?gols/n:0,btts:n?btts/n*100:0,o25:n?o25/n*100:0};
+  },
+
+  _leituraConfronto(meta, recortes, candidatos) {
+    const mandante=String(meta?.mandante || "Mandante"), visitante=String(meta?.visitante || "Visitante");
+    const hc=this._estatFormaCondicao(recortes?.mandanteRecente || [], mandante, "casa");
+    const af=this._estatFormaCondicao(recortes?.visitanteRecente || [], visitante, "fora");
+    const h2h=this._estatH2H(recortes?.h2h || [], mandante, visitante);
+    const partes=[];
+    const fmt=x=>Number(x||0).toFixed(1).replace('.',',');
+    if(hc.n){
+      partes.push(`${mandante} em casa: ${hc.v}V/${hc.e}E/${hc.d}D nos últimos ${hc.n}, média ${fmt(hc.mediaGF)} gol(s) marcado(s) e ${fmt(hc.mediaGA)} sofrido(s)`);
+    } else partes.push(`${mandante} ainda sem amostra recente suficiente em casa`);
+    if(af.n){
+      partes.push(`${visitante} fora: ${af.v}V/${af.e}E/${af.d}D nos últimos ${af.n}, média ${fmt(af.mediaGF)} marcado(s) e ${fmt(af.mediaGA)} sofrido(s)`);
+    } else partes.push(`${visitante} ainda sem amostra recente suficiente fora`);
+
+    const amostras=[hc,af].filter(x=>x.n);
+    if(amostras.length){
+      const media=(campo)=>amostras.reduce((s,x)=>s+(Number(x[campo])||0),0)/amostras.length;
+      const o15=media('o15'), o25=media('o25'), btts=media('btts');
+      let perfilGols = o25 >= 62 ? 'tendência mais aberta para gols' : o15 >= 72 ? 'boa tendência de pelo menos 2 gols' : o15 <= 48 ? 'perfil mais travado e de poucos gols' : 'perfil de gols intermediário';
+      let perfilLados = btts >= 62 ? 'os dois lados vêm participando bastante dos gols' : btts <= 38 ? 'é comum pelo menos um dos lados passar em branco' : 'Ambos Marcam aparece de forma equilibrada';
+      partes.push(`${perfilGols}; ${perfilLados}`);
+    }
+
+    if(h2h.n){
+      const peso=h2h.n<=2?'leve':h2h.n<=5?'médio':'forte';
+      partes.push(`H2H: ${h2h.n} confronto(s), peso ${peso}, com ${h2h.casaV} vitória(s) de ${mandante}, ${h2h.emp} empate(s) e ${h2h.foraV} vitória(s) de ${visitante}`);
+    } else partes.push('H2H ainda sem confronto anterior; ele não interfere nesta leitura');
+
+    const diferenca=(hc.n?hc.ppg:0)-(af.n?af.ppg:0);
+    let equilibrio='confronto sem superioridade recente clara';
+    if(hc.n && af.n){
+      if(diferenca>=0.75) equilibrio=`momento específico favorece ${mandante} em casa`;
+      else if(diferenca<=-0.75) equilibrio=`momento específico favorece ${visitante} fora`;
+      else if(diferenca>=0.3) equilibrio=`leve vantagem recente para ${mandante} em casa`;
+      else if(diferenca<=-0.3) equilibrio=`leve vantagem recente para ${visitante} fora`;
+    }
+    const principal=(candidatos||[])[0];
+    const confPrincipal=Math.round(Number(principal?.confianca)||0);
+    const final=principal
+      ? (confPrincipal >= 35
+          ? `${equilibrio}. Sinal principal agora: ${principal.titulo} (${confPrincipal}%).`
+          : `${equilibrio}. Ainda não há sinal de alta confiança; o mercado melhor ranqueado é ${principal.titulo} (${confPrincipal}%).`)
+      : `${equilibrio}. Nenhum mercado ganhou vantagem suficiente para se destacar sozinho.`;
+    return `Leitura do confronto: ${partes.join('. ')}. Cenário esperado: ${final}`;
+  },
+
   analisar(resultados, meta, mercadosBase = {}) {
     const hist = this._historicoAssociado(resultados);
     if (!meta?.mandante || !meta?.visitante) {
@@ -371,7 +457,7 @@ const AnaliseContextualTimes = {
 
     const recortes = this._recortesCacheados(hist, meta);
     const mercadosSig = Object.entries(mercadosBase || {}).map(([k,m]) => `${k}:${m?.ativo?1:0}:${m?.palpite?.valor ?? ""}:${Math.round(Number(m?.palpite?.percentual)||0)}`).join("|");
-    const geracaoAprendizado = (typeof Aprendizado !== "undefined" ? Number(Aprendizado._geracao || 0) : 0);
+    const geracaoAprendizado = (typeof Aprendizado !== "undefined" ? `${Number(Aprendizado._geracao || 0)}:${Number(Aprendizado._processados?.size || 0)}` : "0:0");
     const chaveAnalise = `${this._assinatura(hist)}|${this._normTime(meta.mandante)}|${this._normTime(meta.visitante)}|${meta?.data || ""}|${meta?.horario || ""}|${mercadosSig}|g${geracaoAprendizado}`;
     const analiseSalva = this._cacheAnalises.get(chaveAnalise);
     if (analiseSalva) return analiseSalva;
@@ -503,8 +589,15 @@ const AnaliseContextualTimes = {
       (Number(b.taxaAjustada)||0)-(Number(a.taxaAjustada)||0) ||
       b.confianca-a.confianca
     );
+    const leituraConfronto = this._leituraConfronto(meta, recortes, candidatos);
     const saida = {
       disponivel:true, amostra:hist.length, confrontos:confrontosVistos, faltamConfrontos:0, candidatos, mercados,
+      leituraConfronto,
+      contexto:{
+        mandanteRecente:this._estatFormaCondicao(recortes.mandanteRecente || [], meta.mandante, "casa"),
+        visitanteRecente:this._estatFormaCondicao(recortes.visitanteRecente || [], meta.visitante, "fora"),
+        h2h:this._estatH2H(recortes.h2h || [], meta.mandante, meta.visitante)
+      },
       resumo:`IA ativa: cada lado é independente. A frequência normal do mercado não dá prioridade sozinha; o ranking procura vantagem sobre a própria taxa-base. Últimos 10 casa/fora têm peso maior, histórico amplo peso menor, e H2H, momento, horário, sequência e acerto individual completam a leitura em ${hist.length} resultados.`
     };
     this._cacheAnalises.set(chaveAnalise, saida);

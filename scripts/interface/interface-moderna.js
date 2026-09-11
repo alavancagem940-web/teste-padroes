@@ -82,8 +82,9 @@
     const resultados = (typeof Historico !== "undefined" && Historico.obterTodos) ? Historico.obterTodos() : [];
     const seq = (typeof Historico !== "undefined" && Historico.obterSequenciaAtual) ? Historico.obterSequenciaAtual() : resultados;
     const ultimo = resultados.at(-1);
-    const geracaoAprendizado = typeof Aprendizado !== "undefined" ? Number(Aprendizado._geracao || 0) : 0;
-    const chave = `${resultados.length}|${ultimo?._temporal?.data || ""}|${ultimo?._temporal?.horario || ""}|${ultimo?.placar || ""}|${ultimo?.mandante || ""}|${ultimo?.visitante || ""}|g${geracaoAprendizado}`;
+    // Cache seguro: só reaproveita previsão quando o HISTÓRICO COMPLETO não mudou.
+    // Não limita, corta nem troca a base carregada do Firebase.
+    const chave = `${resultados.length}|${ultimo?.id||""}|${ultimo?._temporal?.data||""}|${ultimo?._temporal?.horario||""}|${ultimo?.placar||""}`;
     let cache = this._cacheDadosModernos;
     if (!cache || cache.chave !== chave) {
       const liberado = seq.length >= 3;
@@ -127,7 +128,6 @@
       const hist=st.amostra ? `${st.taxa.toFixed(1)}% em ${st.amostra}` : "formando amostra";
       return `<article class="ia-market-card ${chamada?'ativo':''}"><h3>${esc(nome)}</h3><div class="ia-market-value">${chamada?`CHAMADA · ${pct(conf)}`:'SEM CHAMADA'}</div><div class="ia-meter"><span style="width:${chamada?conf:Math.max(0,Math.min(100,Number(st.taxaAjustada)||0))}%"></span></div><div class="ia-market-foot"><span>Taxa própria</span><b>${esc(hist)}</b></div></article>`;
     });
-    // Total e placar exato já são resultados individuais por definição; mantém o candidato atual.
     for (const [k,nome] of [["gols","Total de Gols"],["exato","Placar Exato"]]) {
       const d=m[k]||{}; const valor=this._rotuloMercado(k,d); const conf=d?.palpite?.percentual;
       cards.push(`<article class="ia-market-card ${d?.ativo&&d?.palpite?'ativo':''}"><h3>${nome}</h3><div class="ia-market-value">${esc(valor)}</div><div class="ia-meter"><span style="width:${Number(conf)||0}%"></span></div><div class="ia-market-foot"><span>Confiança atual</span><b>${pct(conf)}</b></div></article>`);

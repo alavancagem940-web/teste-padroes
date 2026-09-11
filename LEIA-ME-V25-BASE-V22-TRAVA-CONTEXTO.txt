@@ -1,0 +1,34 @@
+VAI NA FÉ V25 — BASE V22 FUNCIONAL + TRAVA IMUTÁVEL + CONTEXTO
+
+BASE
+- Esta versão foi reconstruída a partir da V22 funcional.
+- V23/V24 foram descartadas e não serviram de base para o código desta versão.
+- A forma de carregar o histórico/Firebase permanece a da V22: sem corte da base para acelerar a tela.
+
+ALTERAÇÕES
+1. TRAVA IMUTÁVEL DAS 3 SUGESTÕES
+- A primeira fotografia pré-jogo fica travada em uma chave nova da V25.
+- Depois do resultado, a tela usa exclusivamente essa fotografia para GREEN/RED.
+- Se não houver fotografia comprovadamente anterior ao resultado, a V25 NÃO reconstrói a sugestão depois do jogo.
+- Isso impede trocar Menos de 2.5 por Mais de 2.5 (ou qualquer outro lado) após o placar final.
+- Fotografias antigas da V21/V22 só são migradas quando passam nas validações de baseQtd e horário de detecção.
+
+2. ANÁLISE DA IA — LEITURA DO CONFRONTO
+- Mostra forma do mandante em casa, forma do visitante fora, médias de gols, perfil de gols/BTTS, H2H e equilíbrio recente.
+- Fecha com um cenário esperado e o sinal principal atual.
+- Amostras pequenas são identificadas em vez de tratadas como certeza.
+
+3. DESEMPENHO SEM MEXER NA BASE
+- Entradas não é recalculada inteira a cada segundo; o relógio atualiza sozinho quando nada relevante mudou.
+- As outras partidas da fila são fotografadas em segundo plano, uma por vez.
+- Previsões gerais são reutilizadas enquanto o histórico completo não muda.
+- Nenhum limite/truncamento novo foi aplicado ao histórico.
+
+4. MERCADOS INDIVIDUAIS
+- Mais/Menos 1.5, Mais/Menos 2.5, Mais 3.5, U3.5 fixo, Ambos SIM/NÃO e 1/X/2 aparecem separados na página Mercados.
+- Cada lado mostra sua própria taxa/amostra.
+
+U3.5
+- Continua fixo e fora das 3 sugestões.
+- Quando não há chamada, permanece visível em silêncio.
+- O3.5 continua disputando normalmente as 3 sugestões.

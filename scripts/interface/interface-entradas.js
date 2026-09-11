@@ -25,7 +25,8 @@
 
   Interface._partidaSelecionadaTeste = null;
   Interface._resultadoSelecionadoTeste = null;
-  Interface._CHAVE_SUGESTOES_HISTORICAS_TESTE = "vai_na_fe_sugestoes_historicas_individuais_v21";
+  Interface._CHAVE_SUGESTOES_HISTORICAS_TESTE = "vai_na_fe_sugestoes_historicas_imutaveis_v25";
+  Interface._CHAVE_SUGESTOES_HISTORICAS_LEGADO_TESTE = "vai_na_fe_sugestoes_historicas_individuais_v21";
   Interface._assinaturaSnapshotsSugestoesTeste = "";
 
   Interface.iniciar = function () {
@@ -33,17 +34,18 @@
     if (typeof TesteProximasPartidas !== "undefined") TesteProximasPartidas.iniciar();
   };
 
-  // Evita QUALQUER cálculo pesado quando a página Entradas não mudou.
-  // A V22 ainda montava todo o HTML para só depois descobrir que era igual;
-  // em celular isso gastava CPU à toa. Agora a decisão é feita por assinatura barata.
+  // OTIMIZAÇÃO SEGURA SOBRE A V22 FUNCIONAL:
+  // não monta a página inteira a cada segundo. A assinatura só muda quando
+  // histórico, agenda, seleção ou aprendizado COMPLETO mudam. Nenhum resultado
+  // é cortado e a origem dos dados continua exatamente a mesma da V22.
   Interface._ultimaAssinaturaEntradasTeste = "";
   Interface._ultimaPaginaRenderizadaTeste = null;
   Interface._assinaturaRenderEntradasTeste = function () {
     const r = typeof Historico !== "undefined" && Historico.obterUltimo ? Historico.obterUltimo() : null;
     const qtd = typeof Historico !== "undefined" && Historico.obterQuantidade ? Historico.obterQuantidade() : 0;
     const prox = typeof TesteProximasPartidas !== "undefined" ? String(TesteProximasPartidas._assinaturaDados || "") : "";
-    const ger = typeof Aprendizado !== "undefined" ? Number(Aprendizado._geracao || 0) : 0;
-    return `${qtd}|${r?._temporal?.data||""}|${r?._temporal?.horario||""}|${r?.placar||""}|${prox}|${this._partidaSelecionadaTeste||""}|${this._resultadoSelecionadoTeste||""}|g${ger}`;
+    const aprendidos = typeof Aprendizado !== "undefined" ? Number(Aprendizado._processados?.size || 0) : 0;
+    return `${qtd}|${r?.id||""}|${r?._temporal?.data||""}|${r?._temporal?.horario||""}|${r?.placar||""}|${prox}|${this._partidaSelecionadaTeste||""}|${this._resultadoSelecionadoTeste||""}|a${aprendidos}`;
   };
 
   Interface._renderModerno = function () {
@@ -265,11 +267,22 @@
     catch (_) { return {}; }
   };
 
+  Interface._lerSnapshotsLegadoTeste = function () {
+    try { return JSON.parse(localStorage.getItem(this._CHAVE_SUGESTOES_HISTORICAS_LEGADO_TESTE) || "{}") || {}; }
+    catch (_) { return {}; }
+  };
+
   Interface._salvarSnapshotSugestoesTeste = function (slot, meta, sugestoes, baseQtd) {
-    if (!slot?.data || !slot?.horario) return;
+    if (!slot?.data || !slot?.horario) return false;
     const mapa = this._lerSnapshotsSugestoesTeste();
     const chave = `${slot.data}|${slot.horario}`;
-    mapa[chave] = {
+    // IMUTÁVEL: se a primeira fotografia existe, nenhum recálculo pode trocar
+    // MENOS por MAIS (ou qualquer outro mercado) depois.
+    if (mapa[chave]?.travado || mapa[chave]?.sugestoes?.length) return false;
+    const analiseAtual = this._ultimaAnaliseContextualTeste;
+    const registro = {
+      versao: "v25-imutavel",
+      travado: true,
       data: slot.data,
       horario: slot.horario,
       salvoEm: new Date().toISOString(),
@@ -277,6 +290,7 @@
       mandante: meta?.mandante || "",
       visitante: meta?.visitante || "",
       liga: meta?.liga || "Inglês Doméstico (Esportes Virtuais)",
+      analise: analiseAtual?.leituraConfronto || analiseAtual?.resumo || "",
       sugestoes: this._filtrarSugestoesTeste(sugestoes).slice(0, 3).map((x, i) => ({
         titulo: this._tituloIndividualSugestaoTeste(x),
         descricao: x.descricao || "",
@@ -284,12 +298,15 @@
         principal: i === 0,
         mercado: x.mercado || x.k || "",
         k: x.k || x.mercado || "",
-        valor: x.valor ?? ""
+        valor: x.valor ?? "",
+        forca: x.forca || ""
       }))
     };
+    mapa[chave] = registro;
     const entradas = Object.entries(mapa).sort((a,b) => String(a[0]).localeCompare(String(b[0])));
-    const limitado = Object.fromEntries(entradas.slice(-300));
+    const limitado = Object.fromEntries(entradas.slice(-500));
     try { localStorage.setItem(this._CHAVE_SUGESTOES_HISTORICAS_TESTE, JSON.stringify(limitado)); } catch (_) {}
+    return true;
   };
 
   Interface._obterSnapshotSugestoesTeste = function (slot) {
@@ -298,10 +315,39 @@
     return mapa[`${slot.data}|${slot.horario}`] || null;
   };
 
-  // TRAVA RÍGIDA: a PRIMEIRA fotografia válida das sugestões de uma partida é definitiva.
-  // Depois que as 3 entradas aparecem pela primeira vez, elas não podem ser sobrescritas
-  // nem antes, nem durante, nem depois da partida. O resultado serve somente para marcar
-  // GREEN/RED sobre exatamente aquelas sugestões originais.
+  Interface._snapshotValidoAntesResultadoTeste = function (snapshot, r, indice) {
+    if (!snapshot?.sugestoes?.length) return false;
+    const base = Number(snapshot.baseQtd);
+    const idx = Math.max(0, Number(indice) || 0);
+    if (Number.isFinite(base)) {
+      const delta = idx - base;
+      // A fotografia pode ter sido feita para uma das próximas 5 partidas,
+      // então aceitamos pequena diferença. Bases parciais (ex.: 26 contra 379)
+      // são rejeitadas e nunca viram GREEN/RED histórico.
+      if (delta < 0 || delta > 8) return false;
+    }
+    const salvo = Date.parse(snapshot.salvoEm || "");
+    const detectado = Date.parse(r?.detectadoEm || "");
+    if (Number.isFinite(salvo) && Number.isFinite(detectado) && salvo >= detectado) return false;
+    return true;
+  };
+
+  Interface._migrarSnapshotLegadoValidoTeste = function (slot, r, indice) {
+    if (!slot?.data || !slot?.horario) return null;
+    const legado = this._lerSnapshotsLegadoTeste()[`${slot.data}|${slot.horario}`];
+    if (!this._snapshotValidoAntesResultadoTeste(legado, r, indice)) return null;
+    const mapa = this._lerSnapshotsSugestoesTeste();
+    const chave = `${slot.data}|${slot.horario}`;
+    if (!mapa[chave]) {
+      mapa[chave] = {...legado, versao:"v25-migrado-validado", travado:true};
+      try { localStorage.setItem(this._CHAVE_SUGESTOES_HISTORICAS_TESTE, JSON.stringify(mapa)); } catch (_) {}
+    }
+    return mapa[chave] || legado;
+  };
+
+  // A primeira fotografia válida das 3 sugestões é definitiva. Para manter a
+  // V22 rápida, só a partida em foco é calculada antes do paint; as outras são
+  // fotografadas em segundo plano, SEM alterar a fonte/histórico usado.
   Interface._filaSnapshotsTeste = new Set();
   Interface._garantirSnapshotsSugestoesTeste = function (d, slots) {
     const resultados = d.resultados || [];
@@ -315,29 +361,31 @@
       return !dataResultado || !slot?.data || String(dataResultado) === String(slot.data);
     });
 
-    const gerar = (slot) => {
+    const gerar = slot => {
       if (!slot || temResultadoDoSlot(slot)) return;
-      const existente = this._obterSnapshotSugestoesTeste(slot);
-      if (existente?.sugestoes?.length) return;
+      if (this._obterSnapshotSugestoesTeste(slot)?.sugestoes?.length) return;
       const meta = this._metaPartidaTeste(slot);
       if (!meta?.mandante || !meta?.visitante) return;
       const sugestoes = this._sugestoesEntradasTeste(d, meta);
       if (Array.isArray(sugestoes) && sugestoes.length) this._salvarSnapshotSugestoesTeste(slot, meta, sugestoes, resultados.length);
     };
 
-    // Só a partida que o usuário está vendo é calculada antes do primeiro paint.
-    // As demais são pré-aquecidas em segundo plano para não congelar o celular.
     const alvo = listaSlots.find(s => `${s.data}|${s.horario}` === this._partidaSelecionadaTeste) || listaSlots[0];
     gerar(alvo);
 
-    const restantes = listaSlots.filter(s => s !== alvo && !this._obterSnapshotSugestoesTeste(s)?.sugestoes?.length);
-    restantes.forEach((slot, idx) => {
-      const chave = `${slot.data}|${slot.horario}`;
-      if (this._filaSnapshotsTeste.has(chave)) return;
-      this._filaSnapshotsTeste.add(chave);
+    const agendar = (fn, atraso) => {
       setTimeout(() => {
+        if (typeof requestIdleCallback === "function") requestIdleCallback(fn, {timeout: 900});
+        else fn();
+      }, atraso);
+    };
+    listaSlots.filter(s => s !== alvo).forEach((slot, idx) => {
+      const chave = `${slot.data}|${slot.horario}`;
+      if (this._obterSnapshotSugestoesTeste(slot)?.sugestoes?.length || this._filaSnapshotsTeste.has(chave)) return;
+      this._filaSnapshotsTeste.add(chave);
+      agendar(() => {
         try { gerar(slot); } finally { this._filaSnapshotsTeste.delete(chave); }
-      }, 900 + idx * 650);
+      }, 700 + idx * 450);
     });
   };
 
@@ -368,60 +416,26 @@
       timeZone: r?._temporal?.timeZone || "Europe/London"
     };
 
-    // Sem trava H2H para partidas antigas. O confronto direto entra apenas
-    // como uma das evidências e sempre usa somente jogos ANTERIORES à partida.
-    const snapshot = this._obterSnapshotSugestoesTeste(slot);
-    // Nas versões anteriores, o snapshot podia ser sobrescrito logo DEPOIS de o
-    // resultado chegar. baseQtd maior que o índice da partida denuncia esse caso:
-    // havia mais resultados na base ao salvar do que existiam antes deste jogo.
-    // Um snapshot assim é ignorado para não transformar RED em GREEN retroativamente.
-    const baseSnapshot = Number(snapshot?.baseQtd);
-    const snapshotFoiSalvoAntes = snapshot?.sugestoes?.length &&
-      (!Number.isFinite(baseSnapshot) || baseSnapshot <= Math.max(0, indice));
-    if (snapshotFoiSalvoAntes) {
-      return { sugestoes:this._filtrarSugestoesTeste(snapshot.sugestoes).slice(0,3), origem:"Sugestões salvas antes do resultado" };
+    let snapshot = this._obterSnapshotSugestoesTeste(slot);
+    if (!this._snapshotValidoAntesResultadoTeste(snapshot, r, indice)) {
+      snapshot = this._migrarSnapshotLegadoValidoTeste(slot, r, indice);
+    }
+    if (this._snapshotValidoAntesResultadoTeste(snapshot, r, indice)) {
+      return {
+        sugestoes:this._filtrarSugestoesTeste(snapshot.sugestoes).slice(0,3),
+        origem:"Fotografia imutável salva antes do resultado",
+        analise:snapshot.analise || ""
+      };
     }
 
-    try {
-      if (typeof PalpitesRegistrados !== "undefined") {
-        const reg = PalpitesRegistrados.obterParaPartida(slot);
-        const lista = this._sugestoesDePalpitesRegistradosTeste(reg);
-        if (lista.length) return { sugestoes:lista, origem:"Palpites registrados antes do resultado" };
-      }
-    } catch (_) {}
-
-    // Para partidas que já existiam antes desta atualização, reconstrói usando
-    // SOMENTE o histórico anterior ao jogo. Resultados posteriores não entram.
-    try {
-      const anteriores = (d.resultados || []).slice(0, Math.max(0, indice));
-      const temporal = r?._temporal || slot;
-      const mercados = (typeof Previsoes !== "undefined")
-        ? (Previsoes.gerar(anteriores, null, {proximoTemporal:temporal, liberarPalpite:true}).mercados || {})
-        : {};
-      if (typeof AnaliseContextualTimes !== "undefined" && meta?.mandante && meta?.visitante) {
-        const ctx = AnaliseContextualTimes.analisar(anteriores, {...meta, data:slot.data, horario:slot.horario}, mercados);
-        if (ctx?.disponivel && ctx.candidatos?.length) {
-          const lista = ctx.candidatos.map((x,i)=>({
-            titulo:x.titulo, descricao:x.descricao, confianca:x.confianca,
-            principal:i===0, mercado:x.k, k:x.k, valor:x.valor
-          }));
-          const filtrada = this._filtrarSugestoesTeste(lista).slice(0,3).map((x,i)=>({...x,principal:i===0}));
-          if (filtrada.length) return { sugestoes:filtrada, origem:"Reconstruída com o histórico disponível antes do jogo" };
-        }
-      }
-      const lista = Object.entries(mercados)
-        .filter(([,m])=>m?.ativo && m?.palpite)
-        .sort((a,b)=>(Number(b[1].palpite.percentual)||0)-(Number(a[1].palpite.percentual)||0))
-        .map(([k,m],i)=>({
-          titulo:this._rotuloEntradaMercadoTeste(k,m),
-          descricao:"Reconstruída com os resultados anteriores à partida.",
-          confianca:m.palpite.percentual, principal:i===0, mercado:k, k, valor:m.palpite.valor
-        }));
-      const filtrada = this._filtrarSugestoesTeste(lista).slice(0,3).map((x,i)=>({...x,principal:i===0}));
-      return { sugestoes:filtrada, origem:filtrada.length ? "Reconstruída com o histórico disponível antes do jogo" : "Sem sugestão registrada para esta partida" };
-    } catch (_) {
-      return { sugestoes:[], origem:"Sem sugestão registrada para esta partida" };
-    }
+    // REGRA DE AUDITORIA V25: se não existe fotografia comprovadamente anterior
+    // ao resultado, NÃO reconstruímos com dados posteriores e NÃO inventamos
+    // GREEN/RED. Isso é preferível a trocar MENOS 2.5 por MAIS 2.5 depois do jogo.
+    return {
+      sugestoes:[],
+      origem:"Sem fotografia pré-jogo confiável nesta versão; nenhuma sugestão foi reconstruída após o resultado",
+      analise:"A análise histórica não foi recriada porque isso poderia usar informações posteriores à partida e alterar o mercado originalmente mostrado."
+    };
   };
 
   Interface._avaliarSugestaoResultadoTeste = function (s, r) {
@@ -811,7 +825,7 @@
       </div>
       <div class="teste-section-title">SUGESTÕES DOS ESPECIALISTAS NAQUELE JOGO (${sugestoes.length})</div>
       <div class="teste-suggestion-list">${sugestoesHtml}</div>
-      <div class="teste-analysis"><b>▤ REGISTRO DA ANÁLISE</b><p>${esc(hist.origem || "Sugestões anteriores ao resultado.")}. O Over 0.5 continua sendo calculado internamente, mas não aparece entre as sugestões.</p></div>
+      <div class="teste-analysis"><b>▤ REGISTRO DA ANÁLISE</b><p>${esc(hist.analise || hist.origem || "Sugestões anteriores ao resultado.")}</p><small>${esc(hist.origem || "")}</small></div>
       <div class="teste-bottom-details teste-bottom-form">
         <div class="teste-form-box"><div class="teste-form-head"><h3>ÚLTIMOS JOGOS CASA</h3><b>${esc(this._nomeCompletoTimeTeste(mandante))}</b><span>${forma.casa.length}/10</span></div><div class="teste-form-list">${casaHtml}</div></div>
         <div class="teste-form-box"><div class="teste-form-head"><h3>ÚLTIMOS JOGOS VISITANTE</h3><b>${esc(this._nomeCompletoTimeTeste(visitante))}</b><span>${forma.visitante.length}/10</span></div><div class="teste-form-list">${visitanteHtml}</div></div>
@@ -855,9 +869,13 @@
     if (!selecionadaExiste) this._partidaSelecionadaTeste = `${slots[0].data}|${slots[0].horario}`;
     const slotSelecionado = slots.find(s => `${s.data}|${s.horario}` === this._partidaSelecionadaTeste) || slots[0];
     const metaSelecionado = this._metaPartidaTeste(slotSelecionado);
-    // Recalcula a selecionada por último para manter o resumo contextual correto,
-    // já que a rotina de snapshots também analisa as outras quatro partidas.
-    const sugestoes = this._sugestoesEntradasTeste(d, metaSelecionado);
+    // Calcula a selecionada e, se a fotografia pré-jogo já existir, EXIBE a
+    // fotografia travada. Assim o usuário vê depois exatamente os mesmos lados.
+    const sugestoesCalculadas = this._sugestoesEntradasTeste(d, metaSelecionado);
+    const snapshotSelecionado = this._obterSnapshotSugestoesTeste(slotSelecionado);
+    const sugestoes = snapshotSelecionado?.sugestoes?.length
+      ? this._filtrarSugestoesTeste(snapshotSelecionado.sugestoes).slice(0,3)
+      : sugestoesCalculadas;
     const principal = sugestoes[0] || null;
 
     const lista = slots.map((slot, i) => {
@@ -868,13 +886,13 @@
       const qtd = snap?.sugestoes?.length ??
         (Array.isArray(meta?.sugestoes)
           ? this._filtrarSugestoesTeste(meta.sugestoes).slice(0,3).length
-          : (chave === this._partidaSelecionadaTeste ? sugestoes.length : "…"));
+          : (chave === this._partidaSelecionadaTeste ? sugestoes.length : 0));
       const selecionado = !this._resultadoSelecionadoTeste && chave === this._partidaSelecionadaTeste;
       return `<button class="teste-match-row ${selecionado ? "selecionado" : ""}" data-teste-partida="${esc(chave)}">
         <div class="teste-row-time"><span>${labels[i] || "PRÓXIMO JOGO"}</span><b>${esc(slot.horario)}</b></div>
         <div class="teste-league"><i>⚽</i><small>${esc(meta?.liga || "Inglês Doméstico (Esportes Virtuais)")}</small></div>
         <div class="teste-teams-line">${this._nomePartidaTeste(meta)}</div>
-        <div class="teste-count"><b>${Number.isFinite(Number(qtd)) ? Number(qtd) : esc(qtd || "—")}</b><small>sugestões</small></div>
+        <div class="teste-count"><b>${Number.isFinite(Number(qtd)) ? Number(qtd) : "—"}</b><small>sugestões</small></div>
         <span class="teste-chevron">›</span>
       </button>`;
     }).join("");
@@ -887,10 +905,10 @@
       const visitante = metaSelecionado?.visitante || AGUARDA;
       const ctxAtual = this._ultimaAnaliseContextualTeste;
       const h2h = this._confrontosDiretosHistoricoTeste(d.resultados || [], metaSelecionado, 10);
-      const analise = metaSelecionado?.analise ||
+      const analise = snapshotSelecionado?.analise ||
         (ctxAtual?.disponivel
-          ? ctxAtual.resumo
-          : (principal?.descricao || "Calculando os mercados com todos os fatores disponíveis; H2H é apenas um dos pesos."));
+          ? (ctxAtual.leituraConfronto || ctxAtual.resumo)
+          : (metaSelecionado?.analise || principal?.descricao || "Calculando o contexto do confronto com os dados disponíveis; H2H é apenas um dos pesos."));
       const forma = this._ultimosCasaVisitanteTeste(d.resultados || [], metaSelecionado, 10);
       const under35Fixo = this._under35FixoTeste(d);
       const under35FixoHtml = `<div class="teste-under35-fixo ${under35Fixo.ativo ? "ativo" : "silencioso"}"><div><small>U3.5 FIXO · FORA DAS 3 SUGESTÕES</small><b>${esc(under35Fixo.titulo)}</b><p>${esc(under35Fixo.descricao)}</p></div><div class="teste-under35-status"><span>${esc(under35Fixo.status)}</span><b>${under35Fixo.ativo ? pct(under35Fixo.confianca) : "—"}</b></div></div>`;
