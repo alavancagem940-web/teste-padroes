@@ -1,0 +1,12 @@
+VAI NA FÉ V31 — STARTUP FLUIDO
+
+Base: V30, cuja lógica funcional deriva da V22 aprovada.
+
+Correção principal:
+- remove a construção/atualização do painel legado oculto antes da interface moderna;
+- monta a interface moderna imediatamente;
+- lê cache local e inicia sincronização somente após dois frames;
+- não regrava o mesmo cache no startup;
+- mantém prévia dinâmica -> sugestões oficiais -> resultado, mercados individuais e U3.5 fixo.
+
+A V30 ainda chamava originalIniciar(), que construía todo o painel antigo e executava uma atualização completa antes de criar o shell moderno. Isso podia bloquear a thread principal no Safari/iPhone em toda abertura.

@@ -9,7 +9,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="Vai na Fé Virtual">
-  <link rel="manifest" href="manifest.json?v=20260911-startup-inline-v30">
+  <link rel="manifest" href="manifest.json?v=20260911-startup-fluido-v31">
   <link rel="apple-touch-icon" href="icons/icon-180.png">
   <style>
     html,body{margin:0;background:#030815;color:#eef3ff;font-family:Arial,sans-serif}
@@ -48,7 +48,7 @@
     })();
   </script>
 
-  <!-- V30: núcleo embutido no HTML. Isso evita que service workers antigos segurem
+  <!-- V31: núcleo embutido no HTML. Isso evita que service workers antigos segurem
        um arquivo .js novo em rede por dezenas de segundos no Safari/iPhone. -->
   <script>
 "use strict";
@@ -3712,11 +3712,20 @@ document.head.appendChild(st); }
   Interface._paginaModerna = "visao";
 
   Interface.iniciar = function(){
-    originalIniciar();
-    const legado = document.querySelector("#app > .painel");
-    if (legado) { legado.classList.add("ia-legado"); legado.setAttribute("aria-hidden","true"); }
+    // V31: não constrói mais o painel legado oculto na abertura.
+    // O fluxo antigo criava centenas de nós, registrava eventos e executava
+    // uma atualização completa ANTES de montar a interface moderna. No iPhone
+    // isso podia bloquear a thread principal por dezenas de segundos.
+    try { this.criarEstilos(); } catch (_) {}
     this._criarInterfaceModerna();
     this._eventosModernos();
+    if (typeof RelogioPartidas !== "undefined") {
+      RelogioPartidas.iniciar();
+      if (!this._relogioModernoLigadoV31) {
+        this._relogioModernoLigadoV31 = true;
+        RelogioPartidas.observar((a,atual,n)=>this.tickRelogioLeve(a,atual,n));
+      }
+    }
     this._renderModerno();
   };
 
@@ -6088,24 +6097,30 @@ document.addEventListener("DOMContentLoaded", () => {
     Historico.carregarDados(baseMemoria, false, { baseQuantidade: baseMemoria.length });
     Historico.definirBaseEstudo(baseMemoria.length);
 
-    if (typeof Aprendizado !== "undefined") {
-      Aprendizado.iniciar(MemoriaConsolidada.aprendizadoInicial);
-    }
+    // V31: monta a interface moderna ANTES de ler centenas de registros do
+    // localStorage/Firebase. Assim o Safari pinta o app imediatamente e a
+    // hidratação de dados acontece depois do primeiro frame.
+    window.__VAI_NA_FE_BASE_PRONTA__ = false;
+    Interface.iniciar();
 
-    // Carrega o histórico real já salvo no aparelho. Isso é apenas cache de tela;
-    // a partida atual só vira OFICIAL depois que a carga remota completa terminar.
-    const salvos = typeof Armazenamento !== "undefined" ? Armazenamento.obterDados() : [];
-    const locaisRecentes = (Array.isArray(salvos) ? salvos : [])
-      .filter(item =>
-        item && typeof item === "object" && item.fonte === "ao-vivo" && item.placar &&
-        item._temporal?.data && item._temporal?.horario && item.mandante && item.visitante
-      )
-      .sort((a,b) => `${a._temporal.data}|${a._temporal.horario}`.localeCompare(`${b._temporal.data}|${b._temporal.horario}`))
-      .slice(-500);
-    if (locaisRecentes.length) Historico.importarResultadosAoVivo(locaisRecentes, false);
-
-    Historico.definirBaseEstudo(baseMemoria.length);
-    Historico.persistir();
+    const hidratarCacheLocalV31 = () => {
+      if (typeof Aprendizado !== "undefined") {
+        Aprendizado.iniciar(MemoriaConsolidada.aprendizadoInicial);
+      }
+      const salvos = typeof Armazenamento !== "undefined" ? Armazenamento.obterDados() : [];
+      const locaisRecentes = (Array.isArray(salvos) ? salvos : [])
+        .filter(item =>
+          item && typeof item === "object" && item.fonte === "ao-vivo" && item.placar &&
+          item._temporal?.data && item._temporal?.horario && item.mandante && item.visitante
+        )
+        .sort((a,b) => `${a._temporal.data}|${a._temporal.horario}`.localeCompare(`${b._temporal.data}|${b._temporal.horario}`))
+        .slice(-500);
+      if (locaisRecentes.length) Historico.importarResultadosAoVivo(locaisRecentes, false);
+      Historico.definirBaseEstudo(baseMemoria.length);
+      // Não regrava imediatamente o mesmo cache que acabou de ser lido.
+      // A persistência volta a ocorrer apenas quando houver dado novo/alterado.
+      Interface.atualizar();
+    };
 
     // IMPORTANTE: nunca reconstruímos centenas de previsões históricas na thread
     // principal durante a abertura. Esse replay era o principal responsável pelos
@@ -6150,9 +6165,9 @@ document.addEventListener("DOMContentLoaded", () => {
       setTimeout(passo, 1200);
     };
 
-    window.__VAI_NA_FE_BASE_PRONTA__ = false;
-    Interface.iniciar();
-    console.log("Painel aberto com", Historico.obterQuantidadeComHorario(), "resultado(s) em cache.");
+    const iniciarDadosV31 = () => {
+      try { hidratarCacheLocalV31(); } catch (e) { console.warn("Cache local indisponível:", e); }
+      console.log("Painel aberto com", Historico.obterQuantidadeComHorario(), "resultado(s) em cache.");
 
     if (typeof Sincronizacao !== "undefined" && Sincronizacao.configurada()) {
       Sincronizacao.observar(lista => {
@@ -6191,6 +6206,17 @@ document.addEventListener("DOMContentLoaded", () => {
       window.__VAI_NA_FE_BASE_PRONTA__ = true;
       if (typeof Interface !== "undefined") Interface.atualizar();
     }
+    };
+
+    // Dá dois frames ao navegador antes de hidratar histórico e iniciar rede.
+    const aposPrimeiroFrameV31 = () => {
+      if (typeof requestAnimationFrame === "function") {
+        requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(iniciarDadosV31, 0)));
+      } else {
+        setTimeout(iniciarDadosV31, 0);
+      }
+    };
+    aposPrimeiroFrameV31();
 
     // Compatibilidade com o registro antigo; não recalcula mercados aqui.
     if (
@@ -6219,7 +6245,7 @@ document.addEventListener("DOMContentLoaded", () => {
   <script>
     /* Atualiza o service worker em segundo plano. Não participa da abertura do app. */
     if ("serviceWorker" in navigator && location.protocol !== "file:") {
-      navigator.serviceWorker.register("service-worker.js?v=20260911-startup-inline-v30", { updateViaCache: "none" }).catch(() => {});
+      navigator.serviceWorker.register("service-worker.js?v=20260911-startup-fluido-v31", { updateViaCache: "none" }).catch(() => {});
     }
   </script>
 </body>

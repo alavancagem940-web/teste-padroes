@@ -1,9 +1,9 @@
-const CACHE = "esportes-virtuais-mobile-v30-inline";
+const CACHE = "esportes-virtuais-mobile-v31-fluido";
 const CACHE_ESCUDOS = "vai-na-fe-escudos-v1";
 const ASSETS = [
   "./",
   "./index.html",
-  "./manifest.json?v=20260911-startup-inline-v30",
+  "./manifest.json?v=20260911-startup-fluido-v31",
   "./icons/icon-180.png",
   "./icons/icon-192.png",
   "./icons/icon-512.png"
