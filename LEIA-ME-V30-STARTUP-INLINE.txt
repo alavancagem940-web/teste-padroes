@@ -1,0 +1,20 @@
+V30 — STARTUP INLINE / SAFARI
+
+Base lógica: V29, preservando a regra PREVIA DINÂMICA -> OFICIAL -> RESULTADO.
+Comparação feita com a V22 funcional antes da alteração.
+
+Correção principal:
+- O vídeo da V29 mostrou ~43 s em "Abrindo Vai na Fé...".
+- A causa era compatibilidade de atualização: um service worker antigo (V28) ainda podia
+  controlar a primeira abertura e tratava todo arquivo .js como network-first sem timeout.
+- Assim, app-core-v29.js podia ficar preso na rede mesmo com o novo service worker já publicado.
+- Na V30 o núcleo necessário para abrir está embutido no index.html. Não existe requisição
+  externa de JavaScript no caminho crítico da abertura.
+- O novo service worker é atualizado em segundo plano e não bloqueia a tela.
+
+Mantido sem alteração de regra:
+- prévias futuras podem mudar;
+- ao virar a partida atual, 3 sugestões são salvas como oficiais;
+- após resultado, só GREEN/RED das sugestões oficiais;
+- U3.5 fixo fora das 3 sugestões;
+- mercados individuais e análise contextual.

@@ -1,56 +1,3 @@
-<!DOCTYPE html>
-<html lang="pt-BR">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1.0,viewport-fit=cover">
-  <title>Vai na Fé Virtual</title>
-  <meta name="theme-color" content="#030815">
-  <meta name="mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-  <meta name="apple-mobile-web-app-title" content="Vai na Fé Virtual">
-  <link rel="manifest" href="manifest.json?v=20260911-startup-inline-v30">
-  <link rel="apple-touch-icon" href="icons/icon-180.png">
-  <style>
-    html,body{margin:0;background:#030815;color:#eef3ff;font-family:Arial,sans-serif}
-    #app-loading{min-height:180px;display:flex;align-items:center;justify-content:center;padding:24px}
-    .vnaf-loader{display:flex;align-items:center;gap:12px;color:#c9d5ee;font-size:14px}
-    .vnaf-loader i{width:20px;height:20px;border:3px solid #263752;border-top-color:#c026d3;border-radius:50%;animation:vnafSpin .8s linear infinite}
-    @keyframes vnafSpin{to{transform:rotate(360deg)}}
-    @media(prefers-reduced-motion:reduce){.vnaf-loader i{animation:none}}
-  </style>
-</head>
-<body>
-  <div id="app"><div id="app-loading"><div class="vnaf-loader"><i></i><span>Abrindo Vai na Fé…</span></div></div></div>
-
-  <script>
-    /* Limpeza única herdada da base limpa. Não roda novamente em instalações já migradas. */
-    (() => {
-      const MARCADOR = "vai_na_fe_h2h10_placares_20260909_v16";
-      try {
-        if (localStorage.getItem(MARCADOR) !== "ok") {
-          const remover = [
-            "esportes_virtuais_sessao_v2","esportes_virtuais_temporal_v1","esportes_virtuais_sem_dados_v1",
-            "esportes_virtuais_memoria_mercados_v1","esportes_virtuais_consultor_entradas_v2","esportes_virtuais_consultor_modelo_v2",
-            "esportes_virtuais_palpites_registrados_v1","esportes_virtuais_ultimo_palpite_v1","esportes_virtuais_base_estudo_qtd",
-            "vai_na_fe_partidas_coletadas_v1","vai_na_fe_agenda_coletor_cache_v3","esportes_virtuais_sessao_base_zerada_v1",
-            "esportes_virtuais_temporal_base_zerada_v1","esportes_virtuais_sem_dados_base_zerada_v1",
-            "esportes_virtuais_memoria_mercados_base_zerada_v1","vai_na_fe_sugestoes_historicas_base_zerada_v1",
-            "vai_na_fe_base_zerada_20260908_v1","vai_na_fe_sugestoes_historicas_h2h10_v16"
-          ];
-          remover.forEach(chave => localStorage.removeItem(chave));
-          const chaves=[];
-          for(let i=0;i<localStorage.length;i++) chaves.push(localStorage.key(i));
-          chaves.filter(Boolean).forEach(chave=>{if(chave.startsWith("esportes_virtuais_")&&chave!==MARCADOR)localStorage.removeItem(chave);});
-          localStorage.setItem(MARCADOR,"ok");
-        }
-      } catch(e){ console.warn("Não foi possível limpar o armazenamento antigo:",e); }
-    })();
-  </script>
-
-  <!-- V30: núcleo embutido no HTML. Isso evita que service workers antigos segurem
-       um arquivo .js novo em rede por dezenas de segundos no Safari/iPhone. -->
-  <script>
 "use strict";
 
 /*
@@ -6213,14 +6160,3 @@ document.addEventListener("DOMContentLoaded", () => {
   }
   }, 0);
 });
-
-  </script>
-
-  <script>
-    /* Atualiza o service worker em segundo plano. Não participa da abertura do app. */
-    if ("serviceWorker" in navigator && location.protocol !== "file:") {
-      navigator.serviceWorker.register("service-worker.js?v=20260911-startup-inline-v30", { updateViaCache: "none" }).catch(() => {});
-    }
-  </script>
-</body>
-</html>
