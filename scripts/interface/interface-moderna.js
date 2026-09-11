@@ -77,16 +77,24 @@
     }));
   };
 
+  Interface._cacheDadosModernos = { chave:"", resultados:[], seq:[], mercados:{}, liberado:false };
   Interface._dadosModernos = function(){
     const resultados = (typeof Historico !== "undefined" && Historico.obterTodos) ? Historico.obterTodos() : [];
     const seq = (typeof Historico !== "undefined" && Historico.obterSequenciaAtual) ? Historico.obterSequenciaAtual() : resultados;
-    const liberado = seq.length >= 3;
-    let mercados = {};
-    try { mercados = Previsoes.gerar(resultados, seq, {liberarPalpite:liberado}).mercados || {}; } catch(_) {}
+    const ultimo = resultados.at(-1);
+    const geracaoAprendizado = typeof Aprendizado !== "undefined" ? Number(Aprendizado._geracao || 0) : 0;
+    const chave = `${resultados.length}|${ultimo?._temporal?.data || ""}|${ultimo?._temporal?.horario || ""}|${ultimo?.placar || ""}|${ultimo?.mandante || ""}|${ultimo?.visitante || ""}|g${geracaoAprendizado}`;
+    let cache = this._cacheDadosModernos;
+    if (!cache || cache.chave !== chave) {
+      const liberado = seq.length >= 3;
+      let mercados = {};
+      try { mercados = Previsoes.gerar(resultados, seq, {liberarPalpite:liberado}).mercados || {}; } catch(_) {}
+      cache = this._cacheDadosModernos = { chave, resultados, seq, mercados, liberado };
+    }
     const atual = typeof RelogioPartidas !== "undefined" ? RelogioPartidas.partidaAtual() : null;
     const proxima = typeof RelogioPartidas !== "undefined" ? RelogioPartidas.proximaPartida() : null;
     const agora = typeof RelogioPartidas !== "undefined" ? RelogioPartidas.agora() : null;
-    return {resultados,seq,mercados,atual,proxima,agora,liberado};
+    return {resultados:cache.resultados,seq:cache.seq,mercados:cache.mercados,atual,proxima,agora,liberado:cache.liberado};
   };
 
   Interface._rotuloMercado = function(k,d){
@@ -95,15 +103,36 @@
     try { return adapters[k]?.rotulo ? adapters[k].rotulo(d.palpite.valor) : String(d.palpite.valor); } catch(_) { return String(d.palpite.valor); }
   };
 
+  Interface._estatIndividualUI = function(k, valor){
+    try {
+      if (typeof Aprendizado !== "undefined" && typeof Aprendizado.estatisticaMercado === "function") return Aprendizado.estatisticaMercado(k, valor);
+    } catch(_) {}
+    return {amostra:0,taxa:0,taxaAjustada:50};
+  };
+
   Interface._cardsMercados = function(m){
     const defs=[
-      ["ou35","Under 3.5 Gols"],["bm","Ambos Marcam"],["r12","Resultado 1X2"],["ou25","Over / Under 2.5"],["ou15","Over / Under 1.5"],
-      ["under05","Especialista U0.5"],["over35","Especialista O3.5"],["gols","Total de Gols"],["exato","Placar Exato"]
+      ["ou15","MAIS","Mais de 1.5"],["ou15","MENOS","Menos de 1.5"],
+      ["ou25","MAIS","Mais de 2.5"],["ou25","MENOS","Menos de 2.5"],
+      ["over35","MAIS","Mais de 3.5"],["ou35","MENOS","Menos de 3.5 · fixo"],
+      ["bm","SIM","Ambos Marcam — SIM"],["bm","NÃO","Ambos Marcam — NÃO"],
+      ["r12","1","Mandante vence"],["r12","X","Empate"],["r12","2","Visitante vence"],
+      ["under05","MENOS","Menos de 0.5"]
     ];
-    return defs.map(([k,nome])=>{
+    const cards=defs.map(([k,valor,nome])=>{
+      const d=m[k]||{};
+      const chamada=Boolean(d?.ativo && d?.palpite && String(d.palpite.valor).toUpperCase()===String(valor).toUpperCase());
+      const conf=chamada ? Number(d?.palpite?.percentual)||0 : 0;
+      const st=this._estatIndividualUI(k,valor);
+      const hist=st.amostra ? `${st.taxa.toFixed(1)}% em ${st.amostra}` : "formando amostra";
+      return `<article class="ia-market-card ${chamada?'ativo':''}"><h3>${esc(nome)}</h3><div class="ia-market-value">${chamada?`CHAMADA · ${pct(conf)}`:'SEM CHAMADA'}</div><div class="ia-meter"><span style="width:${chamada?conf:Math.max(0,Math.min(100,Number(st.taxaAjustada)||0))}%"></span></div><div class="ia-market-foot"><span>Taxa própria</span><b>${esc(hist)}</b></div></article>`;
+    });
+    // Total e placar exato já são resultados individuais por definição; mantém o candidato atual.
+    for (const [k,nome] of [["gols","Total de Gols"],["exato","Placar Exato"]]) {
       const d=m[k]||{}; const valor=this._rotuloMercado(k,d); const conf=d?.palpite?.percentual;
-      return `<article class="ia-market-card ${d?.ativo&&d?.palpite?'ativo':''}"><h3>${nome}</h3><div class="ia-market-value">${esc(valor)}</div><div class="ia-meter"><span style="width:${Number(conf)||0}%"></span></div><div class="ia-market-foot"><span>Confiança</span><b>${pct(conf)}</b></div></article>`;
-    }).join("");
+      cards.push(`<article class="ia-market-card ${d?.ativo&&d?.palpite?'ativo':''}"><h3>${nome}</h3><div class="ia-market-value">${esc(valor)}</div><div class="ia-meter"><span style="width:${Number(conf)||0}%"></span></div><div class="ia-market-foot"><span>Confiança atual</span><b>${pct(conf)}</b></div></article>`);
+    }
+    return cards.join("");
   };
 
   Interface._renderModerno = function(){
@@ -160,7 +189,7 @@
   };
 
   Interface._pagina_mercados = function(d){
-    return `<div class="ia-two ia-markets-page"><section><div class="ia-card ia-selected"><span class="ia-chip">PARTIDA SELECIONADA</span><div><b>⚽ Inglês Doméstico (Esportes Virtuais)</b><strong>${AGUARDA}</strong><time>${d.proxima?.horario||"--:--"}</time></div></div><div class="ia-market-grid">${this._cardsMercados(d.mercados)}</div></section><aside><section class="ia-card"><h2>DETALHES DA PARTIDA</h2><div class="ia-match-config">⚽<strong>${AGUARDA}</strong><small>Equipes e dados da partida</small></div></section><section class="ia-card ia-analysis"><b>▤ ANÁLISE DA IA</b><p>${AGUARDA}</p></section><section class="ia-card"><h2>RESUMO DOS MERCADOS</h2>${this._resumoMercados(d.mercados)}</section></aside></div>`;
+    return `<div class="ia-two ia-markets-page"><section><div class="ia-card ia-selected"><span class="ia-chip">PARTIDA SELECIONADA</span><div><b>⚽ Inglês Doméstico (Esportes Virtuais)</b><strong>${AGUARDA}</strong><time>${d.proxima?.horario||"--:--"}</time></div></div><div class="ia-market-grid">${this._cardsMercados(d.mercados)}</div></section><aside><section class="ia-card"><h2>DETALHES DA PARTIDA</h2><div class="ia-match-config">⚽<strong>${AGUARDA}</strong><small>Equipes e dados da partida</small></div></section><section class="ia-card ia-analysis"><b>▤ ANÁLISE DA IA</b><p>Os lados são independentes: Mais de 1.5 não compartilha taxa com Menos de 1.5; SIM/NÃO e Casa/Empate/Fora também possuem memória própria.</p></section><section class="ia-card"><h2>RESUMO DOS MERCADOS</h2>${this._resumoMercados(d.mercados)}</section></aside></div>`;
   };
 
   Interface._resumoMercados = function(m){
@@ -200,7 +229,7 @@ html,body{min-height:100%;background:#020611!important}.ia-legado{display:none!i
 .ia-card{background:linear-gradient(145deg,rgba(7,17,34,.96),rgba(4,10,23,.97));border:1px solid #152945;border-radius:10px;padding:16px;box-shadow:inset 0 1px rgba(255,255,255,.02)}.ia-card h2{font-size:16px;margin:0 0 12px}.ia-grid-home{display:grid;grid-template-columns:1.25fr .85fr .72fr;gap:14px}.ia-next{grid-column:span 2}.ia-wide{grid-column:1/-1}.ia-card-title{font-weight:800}.ia-chip{font-size:11px;padding:5px 8px;border-radius:5px;background:#3f1479;color:#d8c2ff;margin-left:8px}.ia-next-body{display:grid;grid-template-columns:130px 1fr;gap:20px;align-items:center;margin-top:12px}.ia-count{border:1px solid #1a2744;border-radius:9px;padding:20px;text-align:center}.ia-count small{display:block;color:#c9d1e3}.ia-count b{font-size:30px}.ia-match-empty,.ia-match-config{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:7px;min-height:115px;text-align:center}.ia-match-empty span,.ia-match-config:first-letter{color:var(--magenta)}.ia-match-empty strong,.ia-match-config strong{color:#caa9ff}.ia-match-empty small,.ia-match-config small,.ia-muted{color:var(--muted)}.ia-confidence{text-align:center}.ia-ring{width:110px;height:110px;margin:12px auto;border-radius:50%;display:grid;place-items:center;background:conic-gradient(#21e382 0 38%,#8227ff 38% 70%,#142035 70%);position:relative}.ia-ring:after{content:"";position:absolute;inset:10px;background:#07101f;border-radius:50%}.ia-ring b{z-index:1;font-size:28px}.ia-confidence>strong{color:var(--green)}.ia-section-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}.ia-section-head h2{margin:0}.ia-section-head button,.ia-section-head span{border:0;background:none;color:#e65cff;cursor:pointer}.ia-market-strip,.ia-market-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px}.ia-market-grid{grid-template-columns:repeat(3,minmax(0,1fr));margin-top:12px}.ia-market-card{border:1px solid #26314c;background:#070d1a;border-radius:9px;padding:13px;min-width:0}.ia-market-card.ativo{border-color:#2c6f48}.ia-market-card h3{font-size:14px;margin:0 0 12px;color:#f1f3fa}.ia-market-value{font-size:22px;font-weight:800;color:#95a5c4;min-height:52px;overflow-wrap:anywhere}.ia-market-card.ativo .ia-market-value{color:#65ee67}.ia-meter{height:7px;background:#122039;border-radius:999px;overflow:hidden;margin:8px 0}.ia-meter span{height:100%;display:block;background:linear-gradient(90deg,#68de79,#00df91);border-radius:999px}.ia-market-foot{display:flex;justify-content:space-between;color:#8997b2;font-size:11px}.ia-market-foot b{color:#dbe4f7}.ia-table{display:grid}.ia-row{display:grid;grid-template-columns:42px minmax(150px,1.5fr) minmax(140px,1fr) 120px;gap:12px;align-items:center;padding:11px 8px;border-bottom:1px solid #142238}.ia-rank{width:27px;height:27px;border-radius:50%;border:1px solid #8ca91d;display:grid;place-items:center;color:#d9ff33}.ia-tag{padding:7px 10px;text-align:center;border-radius:5px;border:1px solid}.ia-tag.ok{color:var(--green);border-color:#087642;background:#062b1c}.ia-tag.warn{color:var(--yellow);border-color:#6c5600;background:#2a2203}.ia-score-list{display:flex;flex-wrap:wrap;gap:7px}.ia-score-list span{padding:8px;border-radius:5px;background:#082213;color:#73ff6f;border:1px solid #174a28;font-weight:800}.ia-stat-big{font-size:42px;font-weight:800;color:#b875ff}.ia-chart-placeholder{height:140px;display:grid;place-items:center;color:#9776b9;background:linear-gradient(180deg,rgba(126,19,223,.12),transparent);border-bottom:1px solid #532175}.ia-tip{border-color:#7c22bd;background:linear-gradient(90deg,#17072b,#0b071d)}.ia-tip b{color:#e59cff}.ia-await,.ia-config-wait{padding:24px;text-align:center;color:#9c8bb9;border:1px dashed #3e285e;border-radius:8px;background:#090818}
 .ia-two{display:grid;grid-template-columns:1fr 1fr;gap:12px}.ia-score-buttons{display:grid;grid-template-columns:repeat(6,1fr);gap:7px}.ia-score-buttons button,.ia-custom-score button,.ia-filter-row button,.ia-outline-btn{border:1px solid #3e2764;background:#12062e;color:#eee;border-radius:6px;padding:10px;cursor:pointer}.ia-score-buttons button:hover{border-color:#a725ff;background:#2a075d}.ia-custom-score{display:flex;gap:8px;margin-top:12px}.ia-custom-score input{flex:1;background:#06101f;color:white;border:1px solid #1a3557;border-radius:6px;padding:11px}.ia-note{color:#95a2bb;font-size:12px}.ia-history{display:grid;gap:4px;max-height:630px;overflow:auto}.ia-history>div{display:grid;grid-template-columns:85px 1fr 100px;gap:10px;padding:9px 10px;border-bottom:1px solid #122238;align-items:center}.ia-history b{color:#78f083;font-size:17px}.ia-history small{color:#8794ac}.ia-history-full>div{grid-template-columns:60px 100px 110px 1fr}.ia-empty-table .ia-row{grid-template-columns:50px 90px 1fr 120px}.ia-entries>section:nth-child(2){min-height:650px}.ia-info-cards{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:8px 0 18px}.ia-info-cards>div{border:1px solid #172945;border-radius:8px;padding:12px;text-align:center}.ia-info-cards small{display:block;color:#9da9c2}.ia-info-cards b{font-size:20px}.ia-analysis{border:1px solid #642297!important;background:linear-gradient(100deg,#1b0737,#100923)!important;border-radius:9px;padding:14px;color:#d9c8f2}.ia-analysis b{color:#ec46ff}.ia-analysis p{line-height:1.6}.ia-markets-page{grid-template-columns:1.8fr 1fr}.ia-markets-page aside{display:grid;align-content:start;gap:10px}.ia-selected>div{display:grid;grid-template-columns:1fr 2fr 100px;gap:12px;align-items:center;margin-top:10px}.ia-selected strong{color:#a995c9}.ia-selected time{text-align:center;font-size:20px}.ia-reminders{display:grid;gap:16px}.ia-filter-row{display:flex;gap:12px}.ia-filter-row button{min-width:160px;font-size:15px}.ia-filter-row button.ativo{background:linear-gradient(135deg,#3b05a8,#6613e5);border-color:#7f23ff}.ia-filter-row .outline{margin-left:auto;background:transparent;border-color:#b918ff}.ia-reminder{display:grid;grid-template-columns:100px 54px 1fr 110px;gap:14px;align-items:center;padding:17px;border-bottom:1px solid #193250}.ia-reminder time{font-size:20px;font-weight:800}.ia-reminder>span{font-size:30px;color:#aa45ff}.ia-reminder div{display:flex;flex-direction:column;gap:4px}.ia-reminder small{color:#afbdd5}.ia-reminder em{font-style:normal;border:1px solid #593ab8;border-radius:5px;padding:8px;text-align:center;color:#c9afff;background:#17103a}.ia-settings{display:grid;gap:12px}.ia-setting{border:1px solid #143051;background:linear-gradient(110deg,#061324,#06101d);border-radius:10px;padding:18px;display:grid;grid-template-columns:1fr 1fr;gap:20px;align-items:center}.ia-setting>div:first-child{display:flex;gap:18px;align-items:flex-start}.ia-setting>div:first-child>span{font-size:30px;color:#b883ff}.ia-setting h2{margin:0 0 4px}.ia-setting p{color:#b5bfd2;margin:0}.ia-setting>div:last-child{display:grid;gap:8px}.ia-setting label{display:flex;justify-content:space-between;gap:20px;border-bottom:1px solid #11243d;padding:8px}.ia-setting select{background:#061326;color:white;border:1px solid #16528c;border-radius:5px;padding:7px}.ia-segment{display:grid!important;grid-template-columns:repeat(3,1fr)}.ia-segment button{padding:12px;background:#071322;border:1px solid #16416b;color:#eee}.ia-segment .ativo{background:linear-gradient(135deg,#4b06c3,#6f0de6)}.ia-outline-btn{border-color:#b417ef;background:transparent}
 @media(max-width:1100px){.ia-shell{grid-template-columns:190px 1fr}.ia-market-strip{grid-template-columns:repeat(3,1fr)}.ia-market-grid{grid-template-columns:repeat(2,1fr)}.ia-grid-home{grid-template-columns:1fr 1fr}.ia-next{grid-column:auto}.ia-confidence{grid-column:auto}}
-@media(max-width:760px){.ia-shell{display:block}.ia-sidebar{position:relative;width:100%;height:auto;padding:10px}.ia-brand{margin:0 0 8px}.ia-nav{display:grid;grid-template-columns:repeat(4,1fr);gap:5px}.ia-nav-item{padding:9px 6px;font-size:11px;justify-content:center;flex-direction:column;gap:3px;text-align:center}.ia-nav-item span{font-size:18px;width:auto}.ia-side-bottom{display:none}.ia-topbar{position:relative;height:auto;padding:14px}.ia-topbar h1{font-size:22px!important}.ia-topbar p{font-size:12px}.ia-clock{font-size:18px}.ia-clock b{font-size:14px}.ia-bell{display:none}.ia-content{padding:8px}.ia-grid-home,.ia-two,.ia-markets-page{grid-template-columns:1fr}.ia-next,.ia-wide{grid-column:auto}.ia-market-strip,.ia-market-grid{grid-template-columns:repeat(2,1fr)}.ia-row{grid-template-columns:32px 1fr!important;gap:5px}.ia-row>*:nth-child(n+3){grid-column:2}.ia-score-buttons{grid-template-columns:repeat(4,1fr)}.ia-selected>div{grid-template-columns:1fr}.ia-filter-row{display:grid;grid-template-columns:1fr 1fr}.ia-filter-row button{min-width:0}.ia-filter-row .outline{margin-left:0}.ia-reminder{grid-template-columns:70px 36px 1fr}.ia-reminder em{grid-column:3}.ia-setting{grid-template-columns:1fr}.ia-market-value{font-size:17px}.ia-next-body{grid-template-columns:1fr}.ia-history>div,.ia-history-full>div{grid-template-columns:70px 1fr}.ia-history small{grid-column:2}.ia-main footer{font-size:11px}}
+@media(max-width:760px){.ia-topbar{backdrop-filter:none!important;-webkit-backdrop-filter:none!important}.ia-shell{display:block}.ia-sidebar{position:relative;width:100%;height:auto;padding:10px}.ia-brand{margin:0 0 8px}.ia-nav{display:grid;grid-template-columns:repeat(4,1fr);gap:5px}.ia-nav-item{padding:9px 6px;font-size:11px;justify-content:center;flex-direction:column;gap:3px;text-align:center}.ia-nav-item span{font-size:18px;width:auto}.ia-side-bottom{display:none}.ia-topbar{position:relative;height:auto;padding:14px}.ia-topbar h1{font-size:22px!important}.ia-topbar p{font-size:12px}.ia-clock{font-size:18px}.ia-clock b{font-size:14px}.ia-bell{display:none}.ia-content{padding:8px}.ia-grid-home,.ia-two,.ia-markets-page{grid-template-columns:1fr}.ia-next,.ia-wide{grid-column:auto}.ia-market-strip,.ia-market-grid{grid-template-columns:repeat(2,1fr)}.ia-row{grid-template-columns:32px 1fr!important;gap:5px}.ia-row>*:nth-child(n+3){grid-column:2}.ia-score-buttons{grid-template-columns:repeat(4,1fr)}.ia-selected>div{grid-template-columns:1fr}.ia-filter-row{display:grid;grid-template-columns:1fr 1fr}.ia-filter-row button{min-width:0}.ia-filter-row .outline{margin-left:0}.ia-reminder{grid-template-columns:70px 36px 1fr}.ia-reminder em{grid-column:3}.ia-setting{grid-template-columns:1fr}.ia-market-value{font-size:17px}.ia-next-body{grid-template-columns:1fr}.ia-history>div,.ia-history-full>div{grid-template-columns:70px 1fr}.ia-history small{grid-column:2}.ia-main footer{font-size:11px}}
 `;
     document.head.appendChild(st);
   };

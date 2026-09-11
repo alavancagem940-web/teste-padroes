@@ -14,6 +14,13 @@ const Aprendizado = {
   _processados: new Set(),
   _iniciado: false,
   _aprendendo: false,
+  _cacheEstatisticas: new Map(),
+  _geracao: 0,
+
+  _invalidarCacheEstatisticas() {
+    this._cacheEstatisticas.clear();
+    this._geracao++;
+  },
 
   _idIndividual(k, valor) {
     const mercado = String(k || "").trim();
@@ -68,6 +75,7 @@ const Aprendizado = {
     for (const chave of (pacote.processados || []).slice(-500)) {
       if (chave) this._processados.add(String(chave));
     }
+    this._invalidarCacheEstatisticas();
     if (salvar) this._salvarLocal();
     return true;
   },
@@ -82,8 +90,12 @@ const Aprendizado = {
   },
 
   estatisticaMercado(k, valor = null) {
-    let amostra = 0, acertos = 0, erros = 0;
     const filtrarLado = valor !== null && valor !== undefined && String(valor) !== "";
+    const chaveCache = `${String(k || "")}|${filtrarLado ? String(valor) : "*"}`;
+    const cache = this._cacheEstatisticas.get(chaveCache);
+    if (cache) return cache;
+
+    let amostra = 0, acertos = 0, erros = 0;
     for (const item of Object.values(this._resumo || {})) {
       if (String(item?.k || "") !== String(k || "")) continue;
       if (filtrarLado && String(item?.valor ?? "") !== String(valor)) continue;
@@ -94,11 +106,13 @@ const Aprendizado = {
     const taxa = amostra ? acertos / amostra * 100 : 0;
     // Beta(3,3): evita que 2/2 tenha mais peso que uma amostra grande.
     const taxaAjustada = amostra ? ((acertos + 3) / (amostra + 6)) * 100 : 50;
-    return {
+    const saida = {
       k, valor: filtrarLado ? String(valor) : null,
       idIndividual: filtrarLado ? this._idIndividual(k, valor) : String(k || ""),
       amostra, acertos, erros, taxa, taxaAjustada
     };
+    this._cacheEstatisticas.set(chaveCache, saida);
+    return saida;
   },
 
   estatisticaIndividual(k, valor) {
@@ -280,12 +294,15 @@ const Aprendizado = {
     const resumoTrabalho = this._clonarResumo(this._resumo);
     const processadosTrabalho = new Set(this._processados);
     let pos = 0;
-    const LOTE = 24;
+    // No celular, reconstruir dezenas de jogos no mesmo frame travava toque e rolagem.
+    // Trabalha em fatias pequenas somente quando o navegador está ocioso.
+    const LOTE_MAX = 4;
 
     const concluir = () => {
       this._resumo = resumoTrabalho;
       this._processados = processadosTrabalho;
       this._aprendendo = false;
+      this._invalidarCacheEstatisticas();
       this._salvarLocal();
       if (typeof Sincronizacao !== "undefined" && Sincronizacao.publicarMemoriaAprendizado) {
         Sincronizacao.publicarMemoriaAprendizado(this.exportar());
@@ -293,24 +310,36 @@ const Aprendizado = {
       if (typeof aoConcluir === "function") { try { aoConcluir(); } catch (_) {} }
     };
 
-    const proximo = () => {
-      const fim = Math.min(indices.length, pos + LOTE);
+    const agendar = (fn) => {
+      if (typeof requestIdleCallback === "function") {
+        requestIdleCallback(fn, { timeout: 180 });
+      } else {
+        setTimeout(() => fn({ timeRemaining: () => 6, didTimeout: true }), 24);
+      }
+    };
+
+    const proximo = (deadline = null) => {
+      let feitos = 0;
       try {
-        for (; pos < fim; pos++) {
+        while (pos < indices.length && feitos < LOTE_MAX) {
+          if (feitos > 0 && deadline && !deadline.didTimeout && typeof deadline.timeRemaining === "function" && deadline.timeRemaining() < 3) break;
           this.aprenderIndice(resultados, indices[pos], {
             resumo: resumoTrabalho,
             processados: processadosTrabalho,
             persistir: false
           });
+          pos++;
+          feitos++;
         }
       } catch (e) {
         console.warn("Falha ao aprender lote de resultados:", e);
+        pos++;
       }
-      if (pos < indices.length) setTimeout(proximo, 0);
+      if (pos < indices.length) agendar(proximo);
       else concluir();
     };
 
-    setTimeout(proximo, 0);
+    agendar(proximo);
     return true;
   }
 };

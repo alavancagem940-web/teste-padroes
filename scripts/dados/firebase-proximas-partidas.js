@@ -255,6 +255,19 @@ const TesteProximasPartidas = {
 
     visitar(bruto);
 
+    const assinaturaNova = JSON.stringify([...novo.entries()].map(([chave, p]) => [
+      chave, p.ordem, p.status, p.liga, p.mandante, p.visitante,
+      p.escudoMandante, p.escudoVisitante, p.analise, p.sugestoes, p.confrontoDireto
+    ]));
+    const mudou = assinaturaNova !== this._assinaturaDados;
+    // Quando nada mudou, não regrava dois blocos grandes de localStorage.
+    // Mantém só o snapshot remoto vivo e sai imediatamente.
+    if (!mudou) {
+      this._partidasRemotas = novo;
+      this._ultimaAtualizacaoRemota = Date.now();
+      return false;
+    }
+
     // O Firebase do coletor já informa qual é a partida ATUAL e a ordem das
     // próximas. Não usamos mais o relógio/resultados do site para decidir qual
     // linha deve aparecer. Isso impede a agenda de "parar" quando passa um
@@ -296,14 +309,8 @@ const TesteProximasPartidas = {
       localStorage.setItem(chaveCache, JSON.stringify(Object.fromEntries(entradas)));
     } catch (_) {}
 
-    const assinaturaNova = JSON.stringify([...novo.entries()].map(([chave, p]) => [
-      chave, p.ordem, p.status, p.liga, p.mandante, p.visitante,
-      p.escudoMandante, p.escudoVisitante,
-      p.analise, p.sugestoes, p.confrontoDireto
-    ]));
-    const mudou = assinaturaNova !== this._assinaturaDados;
     this._assinaturaDados = assinaturaNova;
-    return mudou;
+    return true;
   },
 
   _statusFinal(status) {
@@ -414,12 +421,20 @@ const TesteProximasPartidas = {
       return false;
     }
     this.carregarAgora();
-    if (!this._timer) this._timer = setInterval(() => this.carregarAgora(), this.INTERVALO_MS);
+    if (!this._timer) {
+      const ciclo = async () => {
+        this._timer = null;
+        await this.carregarAgora();
+        const espera = (typeof document !== "undefined" && document.hidden) ? 5000 : this.INTERVALO_MS;
+        if (!this._timer) this._timer = setTimeout(ciclo, espera);
+      };
+      this._timer = setTimeout(ciclo, this.INTERVALO_MS);
+    }
     return true;
   },
 
   parar() {
-    if (this._timer) clearInterval(this._timer);
+    if (this._timer) clearTimeout(this._timer);
     this._timer = null;
   }
 };

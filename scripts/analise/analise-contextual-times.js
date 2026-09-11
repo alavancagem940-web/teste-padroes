@@ -28,6 +28,10 @@ const AnaliseContextualTimes = {
   JANELA_MOMENTO: 20,
   JANELA_FORMA_CONDICAO: 10,
   _cacheConfiabilidade: new Map(),
+  _cacheHistoricoAssociado: { assinatura:"", hist:[] },
+  _cacheRecortes: new Map(),
+  _cachePrefixos: new Map(),
+  _cacheAnalises: new Map(),
 
   _normTime(nome) {
     const n = String(nome || "").trim().toLowerCase()
@@ -119,7 +123,27 @@ const AnaliseContextualTimes = {
     return mapa;
   },
 
+  _fingerprintResultados(resultados) {
+    const lista = Array.isArray(resultados) ? resultados : [];
+    let h = 2166136261 >>> 0;
+    const add = (txt) => {
+      const s = String(txt ?? "");
+      for (let i=0;i<s.length;i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; }
+    };
+    add(lista.length);
+    for (const r of lista) {
+      add(r?._temporal?.data || r?.data || "");
+      add(r?._temporal?.horario || r?.horario || "");
+      add(r?.placar || "");
+      add(r?.mandante || "");
+      add(r?.visitante || "");
+    }
+    return `${lista.length}|${h.toString(36)}`;
+  },
+
   _historicoAssociado(resultados) {
+    const assinaturaBruta = this._fingerprintResultados(resultados);
+    if (this._cacheHistoricoAssociado.assinatura === assinaturaBruta) return this._cacheHistoricoAssociado.hist;
     const metas = this._mapaMetas();
     const out = [];
     for (const r of resultados || []) {
@@ -144,6 +168,11 @@ const AnaliseContextualTimes = {
         _ctxMeta: meta
       });
     }
+    this._cacheHistoricoAssociado = { assinatura:assinaturaBruta, hist:out };
+    // Histórico mudou: resultados dependentes dele deixam de ser válidos.
+    this._cacheRecortes.clear();
+    this._cachePrefixos.clear();
+    this._cacheAnalises.clear();
     return out;
   },
 
@@ -191,6 +220,34 @@ const AnaliseContextualTimes = {
     };
   },
 
+  _recortesCacheados(hist, meta) {
+    const chave = `${this._assinatura(hist)}|${this._normTime(meta?.mandante)}|${this._normTime(meta?.visitante)}|${meta?.horario || ""}`;
+    const salvo = this._cacheRecortes.get(chave);
+    if (salvo) return salvo;
+    const rec = this._recortes(hist, meta);
+    this._cacheRecortes.set(chave, rec);
+    if (this._cacheRecortes.size > 480) this._cacheRecortes.delete(this._cacheRecortes.keys().next().value);
+    return rec;
+  },
+
+  _prefixoTaxa(hist, k, valor) {
+    const chave = `${this._assinatura(hist)}|${k}|${String(valor)}`;
+    const salvo = this._cachePrefixos.get(chave);
+    if (salvo) return salvo;
+    const ok = new Uint16Array(hist.length + 1);
+    const n = new Uint16Array(hist.length + 1);
+    for (let i=0;i<hist.length;i++) {
+      const v = this._valorMercado(hist[i], k);
+      ok[i+1] = ok[i];
+      n[i+1] = n[i];
+      if (v != null) { n[i+1]++; if (String(v) === String(valor)) ok[i+1]++; }
+    }
+    const out = {ok,n};
+    this._cachePrefixos.set(chave,out);
+    if (this._cachePrefixos.size > 160) this._cachePrefixos.delete(this._cachePrefixos.keys().next().value);
+    return out;
+  },
+
   _h2hFirebase(meta) {
     const out = [];
     for (const x of meta?.confrontoDireto || []) {
@@ -201,8 +258,8 @@ const AnaliseContextualTimes = {
   },
 
   _assinatura(hist) {
-    const u = hist.at(-1);
-    return `${hist.length}|${u?._ctxData || ""}|${u?._ctxHorario || ""}|${u?.placar || ""}`;
+    const p = hist?.[0], u = hist?.at(-1);
+    return `${hist.length}|${p?._ctxData || ""}|${p?._ctxHorario || ""}|${u?._ctxData || ""}|${u?._ctxHorario || ""}|${u?.placar || ""}`;
   },
 
   _confiabilidade(hist, k, valor, recorteNome) {
@@ -214,19 +271,21 @@ const AnaliseContextualTimes = {
     if (hist.length < 60) return 1;
 
     const inicio = Math.max(30, hist.length - 350);
+    const prefixo = this._prefixoTaxa(hist, k, valor);
     let ganhos = 0, perdas = 0, usados = 0;
     for (let i = inicio; i < hist.length; i += 2) {
       const anteriores = hist.slice(0, i);
       const alvo = hist[i];
       const meta = alvo?._ctxMeta;
       if (!meta) continue;
-      const rec = this._recortes(anteriores, meta)[recorteNome] || [];
+      const rec = this._recortesCacheados(anteriores, meta)[recorteNome] || [];
       const minimoFonte = (recorteNome === "h2h" || recorteNome === "h2hMesmo") ? 1 : this.MIN_FONTE;
       if (rec.length < minimoFonte) continue;
       const real = this._valorMercado(alvo, k);
       if (real == null) continue;
 
-      const baseP = this._taxa(anteriores, k, valor, 0.5, 0).p;
+      const nBase = prefixo.n[i] || 0;
+      const baseP = nBase ? (prefixo.ok[i] / nBase) : 0.5;
       const fonte = this._taxa(rec, k, valor, baseP);
       const desvio = fonte.p - baseP;
       if (Math.abs(desvio) < 0.02) continue;
@@ -310,7 +369,13 @@ const AnaliseContextualTimes = {
       return { disponivel:false, motivo:"times", amostra:hist.length, confrontos:0, faltamConfrontos:this.MIN_CONFRONTOS_PARA_SUGERIR, candidatos:[], mercados:{} };
     }
 
-    const recortes = this._recortes(hist, meta);
+    const recortes = this._recortesCacheados(hist, meta);
+    const mercadosSig = Object.entries(mercadosBase || {}).map(([k,m]) => `${k}:${m?.ativo?1:0}:${m?.palpite?.valor ?? ""}:${Math.round(Number(m?.palpite?.percentual)||0)}`).join("|");
+    const geracaoAprendizado = (typeof Aprendizado !== "undefined" ? Number(Aprendizado._geracao || 0) : 0);
+    const chaveAnalise = `${this._assinatura(hist)}|${this._normTime(meta.mandante)}|${this._normTime(meta.visitante)}|${meta?.data || ""}|${meta?.horario || ""}|${mercadosSig}|g${geracaoAprendizado}`;
+    const analiseSalva = this._cacheAnalises.get(chaveAnalise);
+    if (analiseSalva) return analiseSalva;
+
     const confrontosVistos = recortes.h2h.length;
     // SEM TRAVA H2H:
     // 0 confrontos = H2H não pesa.
@@ -438,10 +503,13 @@ const AnaliseContextualTimes = {
       (Number(b.taxaAjustada)||0)-(Number(a.taxaAjustada)||0) ||
       b.confianca-a.confianca
     );
-    return {
+    const saida = {
       disponivel:true, amostra:hist.length, confrontos:confrontosVistos, faltamConfrontos:0, candidatos, mercados,
       resumo:`IA ativa: cada lado é independente. A frequência normal do mercado não dá prioridade sozinha; o ranking procura vantagem sobre a própria taxa-base. Últimos 10 casa/fora têm peso maior, histórico amplo peso menor, e H2H, momento, horário, sequência e acerto individual completam a leitura em ${hist.length} resultados.`
     };
+    this._cacheAnalises.set(chaveAnalise, saida);
+    if (this._cacheAnalises.size > 90) this._cacheAnalises.delete(this._cacheAnalises.keys().next().value);
+    return saida;
   }
 };
 

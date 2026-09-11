@@ -33,31 +33,33 @@
     if (typeof TesteProximasPartidas !== "undefined") TesteProximasPartidas.iniciar();
   };
 
-  // Evita reconstruir a página Entradas a cada "tick" do relógio.
-  // O núcleo chama Interface.atualizar() a cada segundo; antes isso apagava e
-  // recriava todos os <img>, causando o pisca-pisca dos escudos.
-  Interface._ultimoHtmlEntradasTeste = null;
+  // Evita QUALQUER cálculo pesado quando a página Entradas não mudou.
+  // A V22 ainda montava todo o HTML para só depois descobrir que era igual;
+  // em celular isso gastava CPU à toa. Agora a decisão é feita por assinatura barata.
+  Interface._ultimaAssinaturaEntradasTeste = "";
   Interface._ultimaPaginaRenderizadaTeste = null;
+  Interface._assinaturaRenderEntradasTeste = function () {
+    const r = typeof Historico !== "undefined" && Historico.obterUltimo ? Historico.obterUltimo() : null;
+    const qtd = typeof Historico !== "undefined" && Historico.obterQuantidade ? Historico.obterQuantidade() : 0;
+    const prox = typeof TesteProximasPartidas !== "undefined" ? String(TesteProximasPartidas._assinaturaDados || "") : "";
+    const ger = typeof Aprendizado !== "undefined" ? Number(Aprendizado._geracao || 0) : 0;
+    return `${qtd}|${r?._temporal?.data||""}|${r?._temporal?.horario||""}|${r?.placar||""}|${prox}|${this._partidaSelecionadaTeste||""}|${this._resultadoSelecionadoTeste||""}|g${ger}`;
+  };
 
   Interface._renderModerno = function () {
     if (this._paginaModerna === "entradas") {
-      try {
-        const dTeste = this._dadosModernos();
-        const htmlTeste = this._pagina_entradas(dTeste);
-        const content = document.getElementById("ia-content");
-        if (
-          this._ultimaPaginaRenderizadaTeste === "entradas" &&
-          this._ultimoHtmlEntradasTeste === htmlTeste &&
-          content && content.childNodes.length
-        ) {
-          // Mantém a DOM e os mesmos elementos de imagem vivos. Atualiza só o relógio.
-          if (typeof this._atualizarRelogioModerno === "function") this._atualizarRelogioModerno(dTeste);
-          const sub = document.getElementById("ia-page-subtitle");
-          if (sub) sub.textContent = "Veja as melhores oportunidades de entrada com base na análise dos padrões e no histórico.";
-          return;
-        }
-        this._ultimoHtmlEntradasTeste = htmlTeste;
-      } catch (_) {}
+      const content = document.getElementById("ia-content");
+      const assinatura = this._assinaturaRenderEntradasTeste();
+      if (this._ultimaPaginaRenderizadaTeste === "entradas" && this._ultimaAssinaturaEntradasTeste === assinatura && content && content.childNodes.length) {
+        try {
+          const agora = typeof RelogioPartidas !== "undefined" ? RelogioPartidas.agora() : null;
+          const atual = typeof RelogioPartidas !== "undefined" ? RelogioPartidas.partidaAtual() : null;
+          const proxima = typeof RelogioPartidas !== "undefined" ? RelogioPartidas.proximaPartida() : null;
+          if (typeof this._atualizarRelogioModerno === "function") this._atualizarRelogioModerno({agora,atual,proxima});
+        } catch (_) {}
+        return;
+      }
+      this._ultimaAssinaturaEntradasTeste = assinatura;
     }
 
     originalRender();
@@ -300,40 +302,43 @@
   // Depois que as 3 entradas aparecem pela primeira vez, elas não podem ser sobrescritas
   // nem antes, nem durante, nem depois da partida. O resultado serve somente para marcar
   // GREEN/RED sobre exatamente aquelas sugestões originais.
+  Interface._filaSnapshotsTeste = new Set();
   Interface._garantirSnapshotsSugestoesTeste = function (d, slots) {
     const resultados = d.resultados || [];
-    const ultimo = resultados.at(-1);
-    const assinatura = `${resultados.length}|${ultimo?._temporal?.data || ""}|${ultimo?._temporal?.horario || ""}|${ultimo?.placar || ""}|${(slots || []).map(s => `${s.data}|${s.horario}`).join(",")}`;
-    if (assinatura === this._assinaturaSnapshotsSugestoesTeste) return;
-    this._assinaturaSnapshotsSugestoesTeste = assinatura;
+    const listaSlots = Array.isArray(slots) ? slots : [];
+    if (!listaSlots.length) return;
 
     const temResultadoDoSlot = slot => resultados.some(r => {
       const dataResultado = r?._temporal?.data || r?.dataPartida || r?.data || "";
       const horarioResultado = r?._temporal?.horario || r?.horario || "";
-      const horarioSlot = String(slot?.horario || "");
-      const dataSlot = String(slot?.data || "");
-      if (!horarioSlot || String(horarioResultado) !== horarioSlot) return false;
-      // Se os dois lados têm data, exige o mesmo dia. Se algum registro antigo
-      // vier sem data, o horário ainda protege o snapshot daquela partida.
-      return !dataResultado || !dataSlot || String(dataResultado) === dataSlot;
+      if (String(horarioResultado) !== String(slot?.horario || "")) return false;
+      return !dataResultado || !slot?.data || String(dataResultado) === String(slot.data);
     });
 
-    for (const slot of slots || []) {
-      // Se já existe fotografia para data+horário, ela é IMUTÁVEL.
-      // Isso impede que novos resultados, mudanças de confiança ou recalculações
-      // troquem qualquer uma das três entradas originalmente mostradas ao usuário.
-      const snapshotExistente = this._obterSnapshotSugestoesTeste(slot);
-      if (snapshotExistente?.sugestoes?.length) continue;
-
-      // Nunca cria a primeira fotografia depois de o resultado já existir.
-      if (temResultadoDoSlot(slot)) continue;
-
+    const gerar = (slot) => {
+      if (!slot || temResultadoDoSlot(slot)) return;
+      const existente = this._obterSnapshotSugestoesTeste(slot);
+      if (existente?.sugestoes?.length) return;
       const meta = this._metaPartidaTeste(slot);
-      if (!meta?.mandante || !meta?.visitante) continue;
+      if (!meta?.mandante || !meta?.visitante) return;
       const sugestoes = this._sugestoesEntradasTeste(d, meta);
-      if (!Array.isArray(sugestoes) || !sugestoes.length) continue;
-      this._salvarSnapshotSugestoesTeste(slot, meta, sugestoes, resultados.length);
-    }
+      if (Array.isArray(sugestoes) && sugestoes.length) this._salvarSnapshotSugestoesTeste(slot, meta, sugestoes, resultados.length);
+    };
+
+    // Só a partida que o usuário está vendo é calculada antes do primeiro paint.
+    // As demais são pré-aquecidas em segundo plano para não congelar o celular.
+    const alvo = listaSlots.find(s => `${s.data}|${s.horario}` === this._partidaSelecionadaTeste) || listaSlots[0];
+    gerar(alvo);
+
+    const restantes = listaSlots.filter(s => s !== alvo && !this._obterSnapshotSugestoesTeste(s)?.sugestoes?.length);
+    restantes.forEach((slot, idx) => {
+      const chave = `${slot.data}|${slot.horario}`;
+      if (this._filaSnapshotsTeste.has(chave)) return;
+      this._filaSnapshotsTeste.add(chave);
+      setTimeout(() => {
+        try { gerar(slot); } finally { this._filaSnapshotsTeste.delete(chave); }
+      }, 900 + idx * 650);
+    });
   };
 
   Interface._chaveResultadoTeste = function (r, indice = -1) {
@@ -863,13 +868,13 @@
       const qtd = snap?.sugestoes?.length ??
         (Array.isArray(meta?.sugestoes)
           ? this._filtrarSugestoesTeste(meta.sugestoes).slice(0,3).length
-          : (chave === this._partidaSelecionadaTeste ? sugestoes.length : 0));
+          : (chave === this._partidaSelecionadaTeste ? sugestoes.length : "…"));
       const selecionado = !this._resultadoSelecionadoTeste && chave === this._partidaSelecionadaTeste;
       return `<button class="teste-match-row ${selecionado ? "selecionado" : ""}" data-teste-partida="${esc(chave)}">
         <div class="teste-row-time"><span>${labels[i] || "PRÓXIMO JOGO"}</span><b>${esc(slot.horario)}</b></div>
         <div class="teste-league"><i>⚽</i><small>${esc(meta?.liga || "Inglês Doméstico (Esportes Virtuais)")}</small></div>
         <div class="teste-teams-line">${this._nomePartidaTeste(meta)}</div>
-        <div class="teste-count"><b>${Number.isFinite(Number(qtd)) ? Number(qtd) : "—"}</b><small>sugestões</small></div>
+        <div class="teste-count"><b>${Number.isFinite(Number(qtd)) ? Number(qtd) : esc(qtd || "—")}</b><small>sugestões</small></div>
         <span class="teste-chevron">›</span>
       </button>`;
     }).join("");

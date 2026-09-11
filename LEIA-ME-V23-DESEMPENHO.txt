@@ -1,0 +1,25 @@
+V23 — DESEMPENHO MOBILE + MERCADOS INDIVIDUAIS
+
+Base: V22 (núcleo).
+
+Correções de desempenho:
+- análise contextual completa em cache por histórico + partida;
+- recortes casa/fora/H2H reutilizados, sem refiltrar centenas de resultados toda hora;
+- taxa-base do backtest de confiabilidade usa prefixos O(1), mantendo a mesma conta;
+- estatísticas individuais de mercado em cache;
+- Previsões.gerar da interface moderna só roda quando o histórico/memória muda;
+- Entradas não monta mais todo o HTML só para descobrir que nada mudou;
+- snapshots das outras próximas partidas são pré-aquecidos em segundo plano;
+- aprendizado da base roda em fatias pequenas no tempo ocioso do navegador;
+- polling do Firebase não regrava localStorage quando a agenda é idêntica e desacelera em aba oculta;
+- blur pesado do topo removido no celular.
+
+Mercados:
+- Mais/Menos 1.5 separados visualmente e na memória;
+- Mais/Menos 2.5 separados;
+- O3.5 e U3.5 separados (U3.5 fixo);
+- Ambos SIM/NÃO separados;
+- Mandante/Empate/Visitante separados;
+- U0.5 individual; O0.5 continua fora das sugestões.
+
+Nenhum histórico do Firebase é apagado.
