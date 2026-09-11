@@ -11,11 +11,16 @@ const RelogioPartidas = {
   JANELA_REGISTRO_RESULTADO_SEGUNDOS: 75,
   _timer: null,
   _listeners: new Set(),
-  _fmtDate(d=new Date()) {
-    return new Intl.DateTimeFormat('en-CA',{timeZone:this.TIME_ZONE,year:'numeric',month:'2-digit',day:'2-digit'}).format(d);
+  _dateFormatter: null,
+  _timeFormatter: null,
+  _garantirFormatadores(){
+    if(!this._dateFormatter) this._dateFormatter=new Intl.DateTimeFormat('en-CA',{timeZone:this.TIME_ZONE,year:'numeric',month:'2-digit',day:'2-digit'});
+    if(!this._timeFormatter) this._timeFormatter=new Intl.DateTimeFormat('en-GB',{timeZone:this.TIME_ZONE,hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false});
   },
+  _fmtDate(d=new Date()) { this._garantirFormatadores(); return this._dateFormatter.format(d); },
   _parts(d=new Date()) {
-    const p=new Intl.DateTimeFormat('en-GB',{timeZone:this.TIME_ZONE,hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}).formatToParts(d);
+    this._garantirFormatadores();
+    const p=this._timeFormatter.formatToParts(d);
     const o={}; for(const x of p) o[x.type]=x.value; return {hour:Number(o.hour),minute:Number(o.minute),second:Number(o.second)};
   },
   agora(d=new Date()) { const p=this._parts(d); return {...p,data:this._fmtDate(d),timeZone:this.TIME_ZONE}; },
@@ -88,7 +93,12 @@ const RelogioPartidas = {
   iniciar(){
     if(this._timer)return;
     const tick=()=>{
-      for(const fn of this._listeners){try{fn(this.agora(),this.partidaAtual(),this.proximaPartida());}catch(e){console.error(e)}}
+      // Calcula o relógio uma única vez por segundo. Antes, agora()/partidaAtual()/
+      // proximaPartida() recriavam várias leituras de fuso no mesmo tick.
+      const a=this.agora();
+      const atual=this._slot(a,0);
+      const proxima=this._addMinutes(atual,3);
+      for(const fn of this._listeners){try{fn(a,atual,proxima);}catch(e){console.error(e)}}
     };
     tick(); this._timer=setInterval(tick,1000);
   },

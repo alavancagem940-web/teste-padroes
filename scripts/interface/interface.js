@@ -36,7 +36,7 @@ const Interface = {
             </div>
           </section>
         </div>`;
-        this.eventos(); if(typeof RelogioPartidas!=='undefined'){ RelogioPartidas.iniciar(); RelogioPartidas.observar(()=>this.tickRelogioLeve()); } this.atualizar(); console.log('Interface iniciada.');
+        this.eventos(); if(typeof RelogioPartidas!=='undefined'){ RelogioPartidas.iniciar(); RelogioPartidas.observar((a,atual,n)=>this.tickRelogioLeve(a,atual,n)); } this.atualizar(); console.log('Interface iniciada.');
     },
     eventos(){
         const container=document.getElementById('botoes-resultados');
@@ -96,8 +96,10 @@ const Interface = {
         const campo=document.getElementById('campo-outro-placar');
         if(campo){campo.value='';campo.hidden=true;document.getElementById('btn-confirmar-outro').hidden=true;}
         if(typeof Sincronizacao!=='undefined'){ if(typeof Sincronizacao.publicarResultado==='function') Sincronizacao.publicarResultado(r); else Sincronizacao.sincronizarAgora(); }
-        if(typeof Aprendizado!=='undefined' && Aprendizado.aprenderPendentes){
-            Aprendizado.aprenderPendentes(Historico.obterTodos());
+        if(typeof Aprendizado!=='undefined' && Aprendizado.aprenderIndice){
+            const todosApr=Historico.obterTodos();
+            const idxApr=todosApr.length-1;
+            setTimeout(()=>{ try{ Aprendizado.aprenderIndice(todosApr,idxApr); }catch(_){} },1200);
         }
         this.atualizar();
     },
@@ -132,8 +134,10 @@ const Interface = {
         document.getElementById('campo-outro-horario-fora').value='';
         document.getElementById('form-outro-horario').hidden=true;
         if(typeof Sincronizacao!=='undefined'){ if(typeof Sincronizacao.publicarResultado==='function') Sincronizacao.publicarResultado(r); else Sincronizacao.sincronizarAgora(); }
-        if(typeof Aprendizado!=='undefined' && Aprendizado.aprenderPendentes){
-            Aprendizado.aprenderPendentes(Historico.obterTodos());
+        if(typeof Aprendizado!=='undefined' && Aprendizado.aprenderIndice){
+            const todosApr=Historico.obterTodos();
+            const idxApr=todosApr.length-1;
+            setTimeout(()=>{ try{ Aprendizado.aprenderIndice(todosApr,idxApr); }catch(_){} },1200);
         }
         this.atualizar();
     },
@@ -185,18 +189,30 @@ const Interface = {
                         : `🔒 <b>Registro bloqueado</b> · será liberado às <b>${horarioLiberacao}</b> (faltam <b>${fmt(segundosAteLiberar)}</b>) · próxima partida: <b>${proxima.horario}</b>`;
         }
     },
-    tickRelogioLeve(){
+    tickRelogioLeve(a=null, atual=null, n=null){
         if(typeof RelogioPartidas==='undefined') return;
-        const a=RelogioPartidas.agora(), atual=RelogioPartidas.partidaAtual(), n=RelogioPartidas.proximaPartida();
-        const hora=document.getElementById('hora-atual'), el=document.getElementById('relogio-partidas'), ph=document.getElementById('proximo-horario');
-        if(hora) hora.innerHTML=`🕒 Hora em Londres: <b>${String(a.hour).padStart(2,'0')}:${String(a.minute).padStart(2,'0')}:${String(a.second).padStart(2,'0')}</b>`;
-        if(el) el.innerHTML=`⚽ Horário da partida atual: <b>${atual.horario}</b> · <b>Próximo jogo: ${n.horario}</b>`;
-        if(ph) ph.textContent=n.horario;
+        a = a || RelogioPartidas.agora();
+        atual = atual || RelogioPartidas.partidaAtual();
+        n = n || RelogioPartidas.proximaPartida();
+
+        // Quando o painel moderno está ativo, o painel legado fica oculto.
+        // Não varremos 25 botões nem fazemos buscas no histórico a cada segundo.
+        // Isso era trabalho invisível no iPhone e ajudava a travar a thread principal.
+        const moderno = Boolean(document.getElementById('ia-shell'));
+        if(!moderno){
+            const hora=document.getElementById('hora-atual'), el=document.getElementById('relogio-partidas'), ph=document.getElementById('proximo-horario');
+            if(hora) hora.innerHTML=`🕒 Hora em Londres: <b>${String(a.hour).padStart(2,'0')}:${String(a.minute).padStart(2,'0')}:${String(a.second).padStart(2,'0')}</b>`;
+            if(el) el.innerHTML=`⚽ Horário da partida atual: <b>${atual.horario}</b> · <b>Próximo jogo: ${n.horario}</b>`;
+            if(ph) ph.textContent=n.horario;
+            this.atualizarEstadoBotoes();
+        }
         if(typeof this._atualizarRelogioModerno==='function') this._atualizarRelogioModerno({agora:a,atual,proxima:n});
-        this.atualizarEstadoBotoes();
+
         const assinatura=`${atual?.data||''}|${atual?.horario||''}|${n?.data||''}|${n?.horario||''}`;
         if(this._ultimoSlotTickLeve==null){ this._ultimoSlotTickLeve=assinatura; return; }
         if(this._ultimoSlotTickLeve!==assinatura){
+            // A única atualização completa comandada pelo relógio acontece
+            // quando realmente muda o slot de 3 minutos.
             this._ultimoSlotTickLeve=assinatura;
             this.atualizar();
         }

@@ -11,86 +11,48 @@
   <meta name="apple-mobile-web-app-title" content="Vai na Fé Virtual">
   <link rel="manifest" href="manifest.json">
   <link rel="apple-touch-icon" href="icons/icon-180.png">
+  <link rel="preload" href="app-core-v29.js?v=20260911-startup-v29" as="script">
+  <style>
+    html,body{margin:0;background:#030815;color:#eef3ff;font-family:Arial,sans-serif}
+    #app-loading{min-height:180px;display:flex;align-items:center;justify-content:center;padding:24px}
+    .vnaf-loader{display:flex;align-items:center;gap:12px;color:#c9d5ee;font-size:14px}
+    .vnaf-loader i{width:20px;height:20px;border:3px solid #263752;border-top-color:#c026d3;border-radius:50%;animation:vnafSpin .8s linear infinite}
+    @keyframes vnafSpin{to{transform:rotate(360deg)}}
+    @media(prefers-reduced-motion:reduce){.vnaf-loader i{animation:none}}
+  </style>
+  <script defer src="app-core-v29.js?v=20260911-startup-v29"></script>
 </head>
 <body>
-  <div id="app"><p style="padding:18px;font-family:Arial,sans-serif">Abrindo painel...</p></div>
+  <div id="app"><div id="app-loading"><div class="vnaf-loader"><i></i><span>Abrindo Vai na Fé…</span></div></div></div>
 
   <script>
-    /* Limpeza única herdada da base limpa V16/V19. */
+    /* Limpeza única herdada da base limpa. Não roda novamente em instalações já migradas. */
     (() => {
       const MARCADOR = "vai_na_fe_h2h10_placares_20260909_v16";
       try {
         if (localStorage.getItem(MARCADOR) !== "ok") {
           const remover = [
-            "esportes_virtuais_sessao_v2",
-            "esportes_virtuais_temporal_v1",
-            "esportes_virtuais_sem_dados_v1",
-            "esportes_virtuais_memoria_mercados_v1",
-            "esportes_virtuais_consultor_entradas_v2",
-            "esportes_virtuais_consultor_modelo_v2",
-            "esportes_virtuais_palpites_registrados_v1",
-            "esportes_virtuais_ultimo_palpite_v1",
-            "esportes_virtuais_base_estudo_qtd",
-            "vai_na_fe_partidas_coletadas_v1",
-            "vai_na_fe_agenda_coletor_cache_v3",
-            "esportes_virtuais_sessao_base_zerada_v1",
-            "esportes_virtuais_temporal_base_zerada_v1",
-            "esportes_virtuais_sem_dados_base_zerada_v1",
-            "esportes_virtuais_memoria_mercados_base_zerada_v1",
-            "vai_na_fe_sugestoes_historicas_base_zerada_v1",
-            "vai_na_fe_base_zerada_20260908_v1",
-            "vai_na_fe_sugestoes_historicas_h2h10_v16"
+            "esportes_virtuais_sessao_v2","esportes_virtuais_temporal_v1","esportes_virtuais_sem_dados_v1",
+            "esportes_virtuais_memoria_mercados_v1","esportes_virtuais_consultor_entradas_v2","esportes_virtuais_consultor_modelo_v2",
+            "esportes_virtuais_palpites_registrados_v1","esportes_virtuais_ultimo_palpite_v1","esportes_virtuais_base_estudo_qtd",
+            "vai_na_fe_partidas_coletadas_v1","vai_na_fe_agenda_coletor_cache_v3","esportes_virtuais_sessao_base_zerada_v1",
+            "esportes_virtuais_temporal_base_zerada_v1","esportes_virtuais_sem_dados_base_zerada_v1",
+            "esportes_virtuais_memoria_mercados_base_zerada_v1","vai_na_fe_sugestoes_historicas_base_zerada_v1",
+            "vai_na_fe_base_zerada_20260908_v1","vai_na_fe_sugestoes_historicas_h2h10_v16"
           ];
           remover.forEach(chave => localStorage.removeItem(chave));
-          const chaves = [];
-          for (let i = 0; i < localStorage.length; i++) chaves.push(localStorage.key(i));
-          chaves.filter(Boolean).forEach(chave => {
-            if (chave.startsWith("esportes_virtuais_") && chave !== MARCADOR) localStorage.removeItem(chave);
-          });
-          localStorage.setItem(MARCADOR, "ok");
+          const chaves=[];
+          for(let i=0;i<localStorage.length;i++) chaves.push(localStorage.key(i));
+          chaves.filter(Boolean).forEach(chave=>{if(chave.startsWith("esportes_virtuais_")&&chave!==MARCADOR)localStorage.removeItem(chave);});
+          localStorage.setItem(MARCADOR,"ok");
         }
-      } catch (e) {
-        console.warn("Não foi possível limpar o armazenamento antigo:", e);
-      }
+      } catch(e){ console.warn("Não foi possível limpar o armazenamento antigo:",e); }
     })();
   </script>
 
-  <script src="escudos-cache.js?v=20260911-previa-oficial-performance-v27"></script>
-  <script src="scripts/aprendizado/memoria-consolidada.js?v=20260911-previa-oficial-performance-v27"></script>
-  <script src="scripts/dados/armazenamento.js?v=20260911-previa-oficial-performance-v27"></script>
-  <script src="scripts/dados/sincronizacao.js?v=20260911-previa-oficial-performance-v27"></script>
-  <script src="scripts/historico/historico.js?v=20260911-previa-oficial-performance-v27"></script>
-  <script src="scripts/analise/calculos.js?v=20260911-previa-oficial-performance-v27"></script>
-  <script src="scripts/mercados/resultado-1x2.js?v=20260911-previa-oficial-performance-v27"></script>
-  <script src="scripts/mercados/ambos-marcam.js?v=20260911-previa-oficial-performance-v27"></script>
-  <script src="scripts/mercados/over-under-0.5.js?v=20260911-previa-oficial-performance-v27"></script>
-  <script src="scripts/mercados/under-0.5.js?v=20260911-previa-oficial-performance-v27"></script>
-  <script src="scripts/mercados/over-under-1.5.js?v=20260911-previa-oficial-performance-v27"></script>
-  <script src="scripts/mercados/over-under-2.5.js?v=20260911-previa-oficial-performance-v27"></script>
-  <script src="scripts/mercados/over-under-3.5.js?v=20260911-previa-oficial-performance-v27"></script>
-  <script src="scripts/mercados/over-3.5.js?v=20260911-previa-oficial-performance-v27"></script>
-  <script src="scripts/mercados/placar-exato.js?v=20260911-previa-oficial-performance-v27"></script>
-  <script src="scripts/mercados/gols-exatos.js?v=20260911-previa-oficial-performance-v27"></script>
-  <script src="scripts/analise/padroes.js?v=20260911-previa-oficial-performance-v27"></script>
-  <script src="scripts/analise/relogio-partidas.js?v=20260911-previa-oficial-performance-v27"></script>
-  <script src="scripts/analise/temporal.js?v=20260911-previa-oficial-performance-v27"></script>
-  <script src="scripts/analise/previsoes.js?v=20260911-previa-oficial-performance-v27"></script>
-  <script src="scripts/desempenho/green-red.js?v=20260911-previa-oficial-performance-v27"></script>
-  <script src="scripts/aprendizado/aprendizado.js?v=20260911-previa-oficial-performance-v27"></script>
-  <script src="scripts/estrategia/consultor-entradas.js?v=20260911-previa-oficial-performance-v27"></script>
-  <script src="scripts/desempenho/palpites-registrados.js?v=20260911-previa-oficial-performance-v27"></script>
-  <script src="scripts/interface/interface.js?v=20260911-previa-oficial-performance-v27"></script>
-  <script src="scripts/interface/interface-moderna.js?v=20260911-previa-oficial-performance-v27"></script>
-
-  <!-- Recursos que estavam na pasta teste e agora fazem parte do núcleo oficial. -->
-  <script src="scripts/dados/firebase-proximas-partidas.js?v=20260911-previa-oficial-performance-v27"></script>
-  <script src="scripts/analise/analise-contextual-times.js?v=20260911-previa-oficial-performance-v27"></script>
-  <script src="scripts/interface/interface-entradas.js?v=20260911-previa-oficial-performance-v27"></script>
-
-  <script src="scripts/js/iniciador.js?v=20260911-previa-oficial-performance-v27"></script>
   <script>
     if ("serviceWorker" in navigator && location.protocol !== "file:") {
-      navigator.serviceWorker.register("service-worker.js?v=20260911-previa-oficial-performance-v27", { updateViaCache: "none" }).catch(() => {});
+      navigator.serviceWorker.register("service-worker.js?v=20260911-startup-v29", { updateViaCache: "none" }).catch(() => {});
     }
   </script>
 </body>

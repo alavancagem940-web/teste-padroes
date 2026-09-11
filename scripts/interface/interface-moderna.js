@@ -27,7 +27,12 @@
   };
 
   Interface.atualizar = function(){
-    originalAtualizar();
+    // No painel moderno o legado fica oculto. Reexecutar a atualização legada
+    // fazia toda a cadeia de previsões/GreenRed/consultor rodar uma segunda vez
+    // a cada mudança de dados. Depois que o shell moderno existe, atualizamos
+    // somente a interface moderna. O legado é atualizado uma única vez na
+    // abertura, antes do shell ser criado, apenas para manter compatibilidade.
+    if (!document.getElementById("ia-shell")) originalAtualizar();
     this._renderModerno();
   };
 

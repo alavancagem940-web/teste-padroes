@@ -350,7 +350,7 @@
     return mapa[`${slot.data}|${slot.horario}`] || null;
   };
 
-  // REGRA V27:
+  // REGRA V28:
   // - Jogos futuros: apenas PRÉVIA, nunca são gravados.
   // - Primeiro jogo da fila: as 3 sugestões viram OFICIAIS e são gravadas UMA vez.
   // - Depois de gravadas, nunca são alteradas. O resultado apenas marca GREEN/RED.
@@ -373,7 +373,7 @@
     if (!lista.length) return null;
 
     const registro = {
-      versao:"v27-oficial", status:"oficial", imutavel:true,
+      versao:"v28-oficial", status:"oficial", imutavel:true,
       data:slot.data, horario:slot.horario, oficialEm:new Date().toISOString(),
       baseQtd:Number(baseQtd)||0, mandante:meta?.mandante||"", visitante:meta?.visitante||"",
       liga:meta?.liga||"Inglês Doméstico (Esportes Virtuais)",

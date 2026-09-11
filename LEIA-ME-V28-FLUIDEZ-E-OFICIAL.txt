@@ -1,0 +1,19 @@
+VAI NA FÉ V28 — FLUIDEZ + PRÉVIA/OFICIAL
+
+BASE
+- Reconstruída a partir da V22 funcional.
+- Não usa V23/V24 como base.
+
+REGRA DAS SUGESTÕES
+- Jogos futuros: PRÉVIA dinâmica, pode mudar a cada resultado.
+- Quando o jogo vira a partida atual: salva as 3 sugestões como OFICIAIS.
+- Depois do resultado, não recalcula nem troca mercado/lado; apenas confere GREEN/RED.
+
+DESEMPENHO
+- Remove replay de centenas de jogos na abertura da thread principal.
+- Memória V4 pronta vem do Firebase/localStorage; novo resultado aprende apenas o item novo.
+- Painel legado oculto não é mais recalculado junto com o painel moderno.
+- Tick de 1 segundo não varre botões/DOM legado.
+- Relógio Europe/London reutiliza Intl.DateTimeFormat e calcula o slot uma vez por tick.
+- Polling de próximas partidas: 2,5 s.
+- Importação do histórico continua em lote, uma ordenação/persistência por lote.

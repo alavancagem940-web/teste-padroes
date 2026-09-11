@@ -1,0 +1,19 @@
+V29 - CORRECAO DE ABERTURA / TRAVAMENTO NO IPHONE
+
+Base funcional auditada: V22.
+Versao imediatamente anterior comparada: V28.
+
+O video de teste mostrou tela branca por dezenas de segundos antes do painel aparecer.
+A causa principal encontrada na abertura era estrutural: o index carregava dezenas de arquivos JS separados e o service worker usava rede primeiro para cada JS.
+
+Alteracoes V29:
+- preserva regras da V28 (previa dinamica, sugestoes oficiais, mercados individuais, U3.5 fixo);
+- junta o nucleo JS em um unico app-core-v29.js;
+- carrega esse bundle com defer;
+- mostra uma tela de abertura escura imediatamente;
+- entrega o primeiro frame ao Safari antes de iniciar leituras/calculos;
+- service worker usa cache-first para o bundle e arquivos estaticos;
+- navegacao nunca fica presa esperando rede lenta: usa cache em ~700 ms e atualiza em segundo plano;
+- install do service worker deixa de baixar dezenas de JS separados.
+
+Arquivos originais continuam no pacote para auditoria/manutencao, mas o index usa somente app-core-v29.js na abertura.

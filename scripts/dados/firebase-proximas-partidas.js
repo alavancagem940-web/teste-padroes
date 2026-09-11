@@ -17,7 +17,7 @@ const TesteProximasPartidas = {
   CHAVE_AGENDA_CACHE: "vai_na_fe_agenda_coletor_base_zerada_v1",
   PADRAO: { caminhoPartidas: "proximas_partidas" },
   TIMEOUT_MS: 4500,
-  INTERVALO_MS: 1500,
+  INTERVALO_MS: 2500,
   _partidas: new Map(),
   _partidasRemotas: new Map(),
   _status: "aguardando",

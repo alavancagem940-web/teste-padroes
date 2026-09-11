@@ -1,0 +1,6162 @@
+"use strict";
+
+/*
+ * Cache persistente dos escudos do núcleo oficial.
+ * Em site estático/GitHub Pages o navegador não pode gravar novos PNGs
+ * fisicamente no repositório. Por isso, os escudos remotos que carregarem
+ * com sucesso ficam guardados no Cache Storage e passam a ser servidos por
+ * uma URL virtual dentro de ./escudos/cache/<id>.png.
+ */
+window.TesteEscudosCache = {
+  CACHE: "vai-na-fe-escudos-v1",
+  PREFIXO: "vai_na_fe_escudo_visto_",
+  _prontos: new Set(),
+
+  iniciar() {
+    // O service-worker principal do núcleo já trata ./escudos/cache/*.png.
+    // Não registramos um segundo SW para não substituir o controlador do app.
+    return true;
+  },
+
+  url(id) {
+    return `./escudos/cache/${Number(id)}.png`;
+  },
+
+  tem(id) {
+    try {
+      const n = Number(id);
+      return this._prontos.has(n) || (Boolean(navigator.serviceWorker?.controller) && localStorage.getItem(`${this.PREFIXO}${n}`) === "1");
+    } catch (_) {
+      return false;
+    }
+  },
+
+  async salvarVisto(img, id) {
+    id = Number(id);
+    if (!img || !id || !("caches" in window)) return;
+
+    const src = String(img.currentSrc || img.src || "");
+    if (!src) return;
+
+    // Se já veio do pacote local ou do próprio cache de escudos, não duplica.
+    let url;
+    try { url = new URL(src, location.href); } catch (_) { return; }
+    if (url.origin === location.origin && /\/escudos\/(?:cache\/)?\d+\.png$/i.test(url.pathname)) return;
+
+    try {
+      const modo = url.origin === location.origin ? "same-origin" : "no-cors";
+      const resposta = await fetch(url.href, { mode: modo, cache: "force-cache" });
+      const cache = await caches.open(this.CACHE);
+      const alvo = new Request(new URL(this.url(id), location.href).href, { method: "GET" });
+      await cache.put(alvo, resposta.clone());
+      this._prontos.add(id);
+      localStorage.setItem(`${this.PREFIXO}${id}`, "1");
+    } catch (_) {
+      // Falha de cache não interfere na exibição normal do escudo.
+    }
+  }
+};
+
+TesteEscudosCache.iniciar();
+"use strict";
+
+/*
+ * BASE ZERADA — 2026-09-08
+ *
+ * A versão de teste não carrega nenhum placar, aprendizado ou backup antigo.
+ * O histórico passa a nascer vazio e é preenchido somente pelos novos
+ * resultados recebidos do Firebase (/historico_compartilhado).
+ */
+const MemoriaConsolidada = {
+  versao: "2026-09-10-MERCADOS-INDIVIDUAIS-V1",
+  quantidade: 0,
+  placares: "",
+  aprendizadoInicial: {},
+  criarBase() { return []; }
+};
+"use strict";
+
+const Armazenamento = {
+    CHAVE_STORAGE: "esportes_virtuais_sessao_base_limpa_h2h10_v2",
+    CHAVE_TEMPORAL: "esportes_virtuais_temporal_base_limpa_h2h10_v2",
+    CHAVE_SEM_DADOS: "esportes_virtuais_sem_dados_base_limpa_h2h10_v2",
+    obterDados() {
+        try { return JSON.parse(localStorage.getItem(this.CHAVE_STORAGE)) || []; }
+        catch (e) { console.error("Erro ao ler armazenamento:", e); return []; }
+    },
+    salvarMetadadosTemporais(dados) { try { localStorage.setItem(this.CHAVE_TEMPORAL, JSON.stringify(Array.isArray(dados)?dados:[])); return true; } catch(e){ console.error("Erro ao salvar horários:",e); return false; } },
+    obterMetadadosTemporais() { try { return JSON.parse(localStorage.getItem(this.CHAVE_TEMPORAL)) || []; } catch(e){ return []; } },
+    salvarHorariosSemDados(dados) { try { localStorage.setItem(this.CHAVE_SEM_DADOS, JSON.stringify(Array.isArray(dados)?dados:[])); return true; } catch(e){ console.error("Erro ao salvar horários sem dados:",e); return false; } },
+    obterHorariosSemDados() { try { return JSON.parse(localStorage.getItem(this.CHAVE_SEM_DADOS)) || []; } catch(e){ return []; } },
+    salvarDados(dados) {
+        try { localStorage.setItem(this.CHAVE_STORAGE, JSON.stringify(dados)); return true; }
+        catch (e) { console.error("Erro ao salvar:", e); return false; }
+    },
+    limpar() { localStorage.removeItem(this.CHAVE_STORAGE); localStorage.removeItem(this.CHAVE_TEMPORAL); localStorage.removeItem(this.CHAVE_SEM_DADOS); }
+};
+"use strict";
+
+/*
+ * FIREBASE LEVE
+ *
+ * A abertura e as atualizacoes consultam somente os 10 resultados recentes.
+ * Cada novo resultado continua sendo enviado individualmente e imediatamente.
+ * A memoria individual (mercado + lado) fica em um caminho separado e compacto.
+ */
+const Sincronizacao = {
+  DATABASE_URL: "https://projeto-padroes-default-rtdb.firebaseio.com",
+  CAMINHO: "historico_compartilhado",
+  CAMINHO_MEMORIA: "memoria_mercados_v4_individuais",
+  CAMINHOS_MEMORIA_ANTIGA: ["memoria_mercados_v1", "memoria_mercados_v2_base_zerada"],
+  LIMITE_RESULTADOS: 10,
+  LIMITE_BASE_APRENDIZADO: 500,
+  INTERVALO_MS: 2000,
+  TIMEOUT_MS: 4500,
+  _timer: null,
+  _rodando: false,
+  _listeners: new Set(),
+  _chavesEntreguesSessao: new Set(),
+  _filaEnvio: new Map(),
+  _memoriaPublicando: false,
+  _memoriaPendente: null,
+
+  configurada() {
+    return /^https:\/\/[^\s]+$/.test(String(this.DATABASE_URL || "").trim());
+  },
+
+  _baseUrl() {
+    return String(this.DATABASE_URL || "").replace(/\/$/, "");
+  },
+
+  _url() {
+    return `${this._baseUrl()}/${this.CAMINHO}.json`;
+  },
+
+  _urlRecentes(limite = this.LIMITE_RESULTADOS) {
+    const n = Math.max(1, Math.min(1000, Number(limite) || this.LIMITE_RESULTADOS));
+    return `${this._url()}?orderBy=%22%24key%22&limitToLast=${n}`;
+  },
+
+  _urlMemoria() {
+    return `${this._baseUrl()}/${this.CAMINHO_MEMORIA}.json`;
+  },
+
+  _chave(r) {
+    const t = r?._temporal;
+    return t?.data && t?.horario ? `${t.data}|${t.horario}` : null;
+  },
+
+  _idFirebase(r) {
+    const chave = this._chave(r);
+    if (!chave) return null;
+    return chave.replace(/\|/g, "_").replace(/:/g, "-").replace(/[.#$\[\]\/]/g, "_");
+  },
+
+  _urlRegistro(r) {
+    const id = this._idFirebase(r);
+    return id ? `${this._baseUrl()}/${this.CAMINHO}/${encodeURIComponent(id)}.json` : null;
+  },
+
+  _normalizar(r) {
+    if (!r?.placar || !r?._temporal?.data || !r?._temporal?.horario) return null;
+    const m = String(r.placar).trim().toLowerCase().match(/^(\d+)x(\d+)$/);
+    if (!m) return null;
+    const casa = Number(m[1]), fora = Number(m[2]);
+    if (!Number.isFinite(casa) || !Number.isFinite(fora)) return null;
+
+    // A IA Coletora nova pode enviar mandante/visitante junto do resultado.
+    // A versão anterior do site descartava esses campos aqui, então a aba
+    // "Últimas entradas" recebia o placar, mas perdia os nomes dos times.
+    const texto = (valor) => {
+      if (valor === undefined || valor === null) return "";
+      if (typeof valor === "object") return String(valor.nome ?? valor.name ?? valor.time ?? "").trim();
+      return String(valor).trim();
+    };
+    const primeiro = (...valores) => {
+      for (const v of valores) {
+        const t = texto(v);
+        if (t) return t;
+      }
+      return "";
+    };
+    const mandante = primeiro(r.mandante, r.casa, r.home, r.timeCasa, r.homeTeam, r.equipeCasa, r.teams?.home);
+    const visitante = primeiro(r.visitante, r.fora, r.away, r.timeFora, r.awayTeam, r.equipeFora, r.teams?.away);
+    const escudoMandante = primeiro(r.escudoMandante, r.escudoCasa, r.homeLogo, r.logoHome, r.logoCasa, r.mandante?.logo, r.home?.logo, r.teams?.home?.logo);
+    const escudoVisitante = primeiro(r.escudoVisitante, r.escudoFora, r.awayLogo, r.logoAway, r.logoFora, r.visitante?.logo, r.away?.logo, r.teams?.away?.logo);
+    const liga = primeiro(r.liga, r.competicao, r.campeonato, r.league, r.competition);
+
+    // BASE LIMPA: resultado sem os DOIS times nao entra no historico,
+    // nao treina mercado e nao participa de confronto direto.
+    if (!mandante || !visitante) return null;
+
+    return {
+      id: this._idFirebase(r),
+      placar: `${casa}x${fora}`,
+      golsCasa: casa,
+      golsFora: fora,
+      totalGols: casa + fora,
+      data: typeof r.data === "string" && r.data ? r.data : new Date().toISOString(),
+      _temporal: {
+        data: r._temporal.data,
+        horario: r._temporal.horario,
+        hora: r._temporal.hora,
+        minuto: r._temporal.minuto,
+        slot3: r._temporal.slot3,
+        timeZone: r._temporal.timeZone || "Europe/London"
+      },
+      fonte: "ao-vivo",
+      ...(mandante ? { mandante } : {}),
+      ...(visitante ? { visitante } : {}),
+      ...(escudoMandante ? { escudoMandante } : {}),
+      ...(escudoVisitante ? { escudoVisitante } : {}),
+      ...(liga ? { liga } : {}),
+      timesConfirmados: Boolean(mandante && visitante)
+    };
+  },
+
+  _listaUnica(lista, limite = this.LIMITE_RESULTADOS) {
+    const mapa = new Map();
+    for (const bruto of (lista || [])) {
+      const r = this._normalizar(bruto);
+      const chave = this._chave(r);
+      if (r && chave) mapa.set(chave, r);
+    }
+    const n = Math.max(1, Math.min(1000, Number(limite) || this.LIMITE_RESULTADOS));
+    return [...mapa.values()]
+      .sort((a, b) => this._chave(a).localeCompare(this._chave(b)))
+      .slice(-n);
+  },
+
+  async _fetch(url, opcoes = {}) {
+    const controle = typeof AbortController !== "undefined" ? new AbortController() : null;
+    const timer = controle ? setTimeout(() => controle.abort(), this.TIMEOUT_MS) : null;
+    try {
+      const resposta = await fetch(url, {
+        cache: "no-store",
+        ...opcoes,
+        ...(controle ? { signal: controle.signal } : {})
+      });
+      if (!resposta.ok) throw new Error(`Banco remoto HTTP ${resposta.status}`);
+      return resposta;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  },
+
+  async obterUltimos(limite = this.LIMITE_RESULTADOS) {
+    if (!this.configurada()) return [];
+    const resposta = await this._fetch(this._urlRecentes(limite));
+    const dados = await resposta.json();
+    if (!dados) return [];
+    return this._listaUnica(Array.isArray(dados) ? dados : Object.values(dados), limite);
+  },
+
+  // Na abertura baixa a BASE LIMPA completa (ate 500 resultados) para
+  // reconstruir aprendizado e H2H. Depois o polling continua leve, com 10.
+  async obterHistoricoCompleto() {
+    return this.obterUltimos(this.LIMITE_BASE_APRENDIZADO);
+  },
+
+  async _putRegistro(r) {
+    const url = this._urlRegistro(r);
+    if (!url) return false;
+    await this._fetch(url, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(r)
+    });
+    return true;
+  },
+
+  async publicarResultado(resultado) {
+    const r = this._normalizar(resultado);
+    const chave = this._chave(r);
+    if (!r || !chave) return false;
+    this._filaEnvio.set(chave, r);
+    this._chavesEntreguesSessao.add(chave);
+    this.sincronizarAgora();
+    return true;
+  },
+
+  async sincronizarAgora() {
+    if (!this.configurada() || this._rodando) return false;
+    this._rodando = true;
+    try {
+      // PUT por horario e idempotente. Nao precisamos baixar a base inteira
+      // para descobrir se o resultado ja existe.
+      for (const [chave, local] of [...this._filaEnvio.entries()]) {
+        await this._putRegistro(local);
+        this._filaEnvio.delete(chave);
+      }
+
+      const recentes = await this.obterUltimos(this.LIMITE_RESULTADOS);
+      const novos = recentes.filter(r => {
+        const chave = this._chave(r);
+        return Boolean(chave && !this._chavesEntreguesSessao.has(chave));
+      });
+      if (novos.length) {
+        for (const r of novos) this._chavesEntreguesSessao.add(this._chave(r));
+        for (const fn of this._listeners) {
+          try { fn(novos); } catch (e) { console.error(e); }
+        }
+      }
+      return true;
+    } catch (e) {
+      console.warn("Sincronizacao leve indisponivel:", e);
+      return false;
+    } finally {
+      this._rodando = false;
+    }
+  },
+
+  async limparMemoriasAntigasRemotasUmaVez() {
+    if (!this.configurada()) return false;
+    const marcador = "vai_na_fe_memorias_antigas_remotas_limpas_h2h10_v1";
+    try {
+      if (localStorage.getItem(marcador) === "ok") return true;
+    } catch (_) {}
+    let tudoOk = true;
+    for (const caminho of this.CAMINHOS_MEMORIA_ANTIGA || []) {
+      try {
+        await this._fetch(`${this._baseUrl()}/${caminho}.json`, { method: "DELETE" });
+      } catch (e) {
+        tudoOk = false;
+        console.warn(`Nao foi possivel limpar /${caminho}:`, e);
+      }
+    }
+    if (tudoOk) {
+      try { localStorage.setItem(marcador, "ok"); } catch (_) {}
+    }
+    return tudoOk;
+  },
+
+  observar(fn) {
+    if (typeof fn === "function") this._listeners.add(fn);
+    return () => this._listeners.delete(fn);
+  },
+
+  iniciar() {
+    if (!this.configurada() || this._timer) return false;
+    this._chavesEntreguesSessao = new Set();
+    this._filaEnvio = new Map();
+    // Nao aguarda a rede: a tela ja esta pronta quando isto comeca.
+    this.sincronizarAgora();
+    this._timer = setInterval(() => this.sincronizarAgora(), this.INTERVALO_MS);
+    return true;
+  },
+
+  parar() {
+    if (this._timer) clearInterval(this._timer);
+    this._timer = null;
+  },
+
+  async obterMemoriaAprendizado() {
+    if (!this.configurada()) return null;
+    try {
+      const resposta = await this._fetch(this._urlMemoria());
+      return await resposta.json();
+    } catch (e) {
+      console.warn("Memoria remota indisponivel; usando memoria embutida/local.");
+      return null;
+    }
+  },
+
+  publicarMemoriaAprendizado(pacote) {
+    if (!this.configurada() || !pacote) return false;
+    this._memoriaPendente = pacote;
+    if (this._memoriaPublicando) return true;
+    this._memoriaPublicando = true;
+    setTimeout(async () => {
+      let atual = null;
+      try {
+        while (this._memoriaPendente) {
+          atual = this._memoriaPendente;
+          this._memoriaPendente = null;
+          await this._fetch(this._urlMemoria(), {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(atual)
+          });
+        }
+      } catch (e) {
+        // Se nao chegou uma memoria mais nova durante a tentativa, conserva o
+        // pacote atual para o proximo ciclo. Nenhum aprendizado se perde.
+        if (!this._memoriaPendente && atual) {
+          this._memoriaPendente = atual;
+        }
+        console.warn("Memoria dos mercados sera reenviada depois:", e);
+      } finally {
+        this._memoriaPublicando = false;
+      }
+    }, 250);
+    return true;
+  }
+};
+"use strict";
+
+/*
+ * HISTÓRICO CONTÍNUO
+ *
+ * - O backup continua sendo base de estudo, sem horário.
+ * - Todo resultado real com data+horário pertence a UMA sequência temporal
+ *   contínua, inclusive quando o app fecha ou é aberto em outro dispositivo.
+ * - Marcadores antigos "PAUSA" são ignorados ao carregar.
+ * - Intervalos sem resultado não quebram a sequência; são analisados pela
+ *   camada temporal como GAP / slots sem resultado.
+ */
+const Historico = {
+    resultados: [],
+    sequencias: [], // mantido por compatibilidade; a sessão operacional agora é contínua.
+    sequenciaAtual: [],
+    dadosBrutos: [],
+    baseEstudoQuantidade: 0,
+    baseEstudoBrutosIndice: 0,
+    metadadosTemporais: [],
+    horariosSemDados: [],
+    horariosSemDadosSessao: [],
+
+    _ehAoVivo(r) { return r?.fonte === "ao-vivo"; },
+
+    iniciar() {
+        this.limpar(false);
+        this.horariosSemDados = typeof Armazenamento !== "undefined" ? Armazenamento.obterHorariosSemDados() : [];
+        this.horariosSemDadosSessao = [...this.horariosSemDados];
+        console.log("Histórico contínuo iniciado.");
+    },
+
+    _indiceBrutosParaQuantidade(qtd) {
+        const alvo = Math.max(0, Number(qtd) || 0);
+        if (!this.dadosBrutos.length || alvo === 0) return alvo === 0 ? 0 : this.dadosBrutos.length;
+        let vistos = 0;
+        for (let i = 0; i < this.dadosBrutos.length; i++) {
+            const item = this.dadosBrutos[i];
+            if (item === "PAUSA") continue; // compatibilidade com arquivos antigos
+            if (typeof item === "string" || item?.placar) vistos++;
+            if (vistos >= alvo) return i + 1;
+        }
+        return this.dadosBrutos.length;
+    },
+
+    _chaveTemporal(r) {
+        const t = r?._temporal;
+        if (!t?.data || !t?.horario) return null;
+        return `${t.data}|${t.horario}`;
+    },
+
+    _ordenarCronologicamente(lista) {
+        return [...(lista || [])].sort((a, b) => {
+            const ka = this._chaveTemporal(a), kb = this._chaveTemporal(b);
+            if (!ka && !kb) return 0;
+            if (!ka) return -1;
+            if (!kb) return 1;
+            return ka.localeCompare(kb);
+        });
+    },
+
+    _sincronizarOrdemAtual() {
+        const backup = this.resultados.filter(r => !this._ehAoVivo(r));
+        const aoVivo = this._ordenarCronologicamente(this.resultados.filter(r => this._ehAoVivo(r)));
+        this.resultados = backup.concat(aoVivo);
+        this.sequenciaAtual = aoVivo.filter(r => this._chaveTemporal(r));
+
+        // Reconstrói o armazenamento sem PAUSA. O histórico temporal fica sempre
+        // contínuo e ordenado, mesmo quando um resultado antigo é registrado depois.
+        this.dadosBrutos = this.resultados.map(r => ({
+            placar: r.placar,
+            _temporal: r._temporal || null,
+            fonte: r.fonte || (r._temporal ? "ao-vivo" : "backup"),
+            data: r.data || null,
+            mandante: r.mandante || null,
+            visitante: r.visitante || null,
+            escudoMandante: r.escudoMandante || null,
+            escudoVisitante: r.escudoVisitante || null,
+            liga: r.liga || null,
+            timesConfirmados: Boolean(r.mandante && r.visitante)
+        }));
+        this.metadadosTemporais = this.dadosBrutos.map(x => x?._temporal || null);
+        this.baseEstudoBrutosIndice = Math.min(this.baseEstudoQuantidade, this.dadosBrutos.length);
+    },
+
+    definirBaseEstudo(qtd = null) {
+        // Não zera mais a sequência temporal. "Base de estudo" agora serve
+        // somente para separar o backup histórico da contagem GREEN/RED.
+        this.baseEstudoQuantidade = Number.isFinite(Number(qtd)) ? Number(qtd) : this.resultados.filter(r => !this._ehAoVivo(r)).length;
+        this.baseEstudoBrutosIndice = this._indiceBrutosParaQuantidade(this.baseEstudoQuantidade);
+        return this.baseEstudoQuantidade;
+    },
+
+    obterQuantidadeBaseEstudo() { return this.baseEstudoQuantidade; },
+    obterIndiceBaseEstudoBrutos() { return this.baseEstudoBrutosIndice; },
+    obterQuantidadeResultadosNovaSessao() { return this.sequenciaAtual.length; },
+    validarPlacar(placar) { return typeof placar === "string" && /^\d+x\d+$/i.test(placar.trim()); },
+
+    criarResultado(placar, meta = null) {
+        const [casa, fora] = placar.trim().toLowerCase().split("x").map(Number);
+        const temporal = meta?.__semTemporal
+            ? null
+            : (meta || (typeof RelogioPartidas !== "undefined" ? (() => {
+                const p = RelogioPartidas.partidaParaRegistrarResultado();
+                return { data: p.data, horario: p.horario, hora: p.hora, minuto: p.minuto, slot3: p.hora * 60 + p.minuto, timeZone: p.timeZone };
+            })() : null));
+        return {
+            id: this.resultados.length + 1,
+            placar: `${casa}x${fora}`,
+            golsCasa: casa,
+            golsFora: fora,
+            totalGols: casa + fora,
+            data: meta?.__dataCriacao || new Date().toISOString(),
+            _temporal: temporal,
+            fonte: (meta && meta.__fonte) || "ao-vivo"
+        };
+    },
+
+    adicionar(placar, salvar = true, meta = null) {
+        if (!this.validarPlacar(placar)) return false;
+        const temporal = meta?.__semTemporal
+            ? null
+            : (meta || (typeof RelogioPartidas !== "undefined" ? (() => {
+                const p = RelogioPartidas.partidaParaRegistrarResultado();
+                return { data: p.data, horario: p.horario, hora: p.hora, minuto: p.minuto, slot3: p.hora * 60 + p.minuto, timeZone: p.timeZone };
+            })() : null));
+
+        if (temporal?.data && temporal?.horario && this.resultados.some(x =>
+            this._ehAoVivo(x) && x?._temporal?.data === temporal.data && x?._temporal?.horario === temporal.horario
+        )) {
+            return { duplicado: true, temporal };
+        }
+
+        const r = this.criarResultado(placar, { ...(temporal || {}), ...(meta || {}) });
+        r.fonte = meta?.__fonte || "ao-vivo";
+        if (meta?.__semTemporal) r._temporal = null;
+        this.resultados.push(r);
+
+        if (this._ehAoVivo(r) && r._temporal?.data && r._temporal?.horario) {
+            this.sequenciaAtual.push(r);
+            const chave = `${r._temporal.data}|${r._temporal.horario}`;
+            this.horariosSemDados = this.horariosSemDados.filter(x => x !== chave);
+            this.horariosSemDadosSessao = this.horariosSemDadosSessao.filter(x => x !== chave);
+        }
+
+        this._sincronizarOrdemAtual();
+        if (salvar) this.persistir();
+        return r;
+    },
+
+    carregarDados(dados, salvar = false, opcoes = {}) {
+        if (!Array.isArray(dados)) return false;
+        this.limpar(false);
+        const metas = (typeof Armazenamento !== "undefined" && Array.isArray(Armazenamento.obterMetadadosTemporais?.()))
+            ? Armazenamento.obterMetadadosTemporais() : [];
+        const baseQuantidade = Number.isFinite(Number(opcoes.baseQuantidade))
+            ? Number(opcoes.baseQuantidade)
+            : dados.filter(x => x !== "PAUSA" && (typeof x === "string" || x?.placar)).length;
+
+        let idx = 0, resultadosTotais = 0;
+        for (const item of dados) {
+            if (item === "PAUSA") continue; // PAUSA antiga é descartada definitivamente.
+            if (typeof item !== "string" && !(item && item.placar)) continue;
+            const placar = typeof item === "string" ? item : item.placar;
+            const ehBackup = resultadosTotais < baseQuantidade;
+            const metaOriginal = (typeof item === "object" ? item?._temporal : null) || metas[idx] || null;
+            const meta = ehBackup
+                ? { __semTemporal: true, __fonte: "backup", __dataCriacao: item?.data || null }
+                : (metaOriginal?.data && metaOriginal?.horario
+                    ? { ...metaOriginal, __fonte: "ao-vivo", __dataCriacao: item?.data || null }
+                    : { __semTemporal: true, __fonte: "ao-vivo", __dataCriacao: item?.data || null });
+            this.adicionar(placar, false, meta);
+            idx++;
+            resultadosTotais++;
+        }
+        this.definirBaseEstudo(baseQuantidade);
+        if (salvar) this.persistir();
+        return true;
+    },
+
+    // Mantido para indicar lacunas na interface, mas lacunas NÃO encerram sessão.
+    registrarHorarioSemDados(meta = null, salvar = true) {
+        const t = meta || (typeof RelogioPartidas !== "undefined" ? RelogioPartidas.partidaAnterior() : null);
+        if (!t?.data || !t?.horario) return false;
+        const chave = `${t.data}|${t.horario}`;
+        if (this.temResultadoNoHorario(t)) return false;
+        if (!this.horariosSemDados.includes(chave)) {
+            this.horariosSemDados.push(chave);
+            if (!this.horariosSemDadosSessao.includes(chave)) this.horariosSemDadosSessao.push(chave);
+            if (salvar && typeof Armazenamento !== "undefined") Armazenamento.salvarHorariosSemDados(this.horariosSemDados);
+            return true;
+        }
+        return false;
+    },
+
+    obterHorariosSemDados() { return [...this.horariosSemDados]; },
+
+    obterUltimosEventosSessao(limite = 10) {
+        // Visual limpo: mostra resultados reais. Os vazios continuam sendo
+        // inferidos internamente pelo intervalo entre os horários.
+        return this.sequenciaAtual.slice(-Math.max(1, Number(limite) || 10)).map(r => ({
+            tipo: "resultado",
+            placar: r.placar,
+            data: r._temporal?.data,
+            horario: r._temporal?.horario,
+            chave: this._chaveTemporal(r)
+        }));
+    },
+
+    obterResultadosComHorario() { return [...this.sequenciaAtual]; },
+    obterQuantidadeComHorario() { return this.sequenciaAtual.length; },
+
+    obterResumoTemporal() {
+        const lista = this.sequenciaAtual;
+        const primeiro = lista[0] || null;
+        const ultimo = lista.at(-1) || null;
+        return {
+            quantidade: lista.length,
+            primeiro: primeiro?._temporal || null,
+            ultimo: ultimo?._temporal || null,
+            ultimoPlacar: ultimo?.placar || null
+        };
+    },
+
+    estaSemDados(meta = null) {
+        const t = meta || (typeof RelogioPartidas !== "undefined" ? RelogioPartidas.partidaAtual() : null);
+        if (!t?.data || !t?.horario) return false;
+        return this.horariosSemDados.includes(`${t.data}|${t.horario}`);
+    },
+
+    temResultadoNoHorario(meta = null) {
+        const t = meta || (typeof RelogioPartidas !== "undefined" ? RelogioPartidas.partidaParaRegistrarResultado() : null);
+        if (!t?.data || !t?.horario) return false;
+        return this.sequenciaAtual.some(x => x?._temporal?.data === t.data && x?._temporal?.horario === t.horario);
+    },
+
+    obterResultadoNoHorario(meta = null) {
+        const t = meta || (typeof RelogioPartidas !== "undefined" ? RelogioPartidas.partidaParaRegistrarResultado() : null);
+        if (!t?.data || !t?.horario) return null;
+        return this.sequenciaAtual.find(x => x?._temporal?.data === t.data && x?._temporal?.horario === t.horario) || null;
+    },
+
+    _aplicarTimesResultado(destino, origem) {
+        if (!destino || !origem) return false;
+        let mudou = false;
+        for (const campo of ["mandante", "visitante", "escudoMandante", "escudoVisitante", "liga"]) {
+            const valor = origem?.[campo];
+            if (valor !== undefined && valor !== null && String(valor).trim() && destino[campo] !== valor) {
+                destino[campo] = valor;
+                mudou = true;
+            }
+        }
+        if (destino.mandante && destino.visitante) destino.timesConfirmados = true;
+        return mudou;
+    },
+
+    importarResultadosAoVivo(lista, salvar = true) {
+        if (!Array.isArray(lista)) return 0;
+
+        // IMPORTAÇÃO EM LOTE: na V22 cada resultado chamava adicionar(), que
+        // reordenava todo o histórico a cada item. Com centenas de resultados
+        // isso virava O(n²) e travava principalmente no celular. Aqui montamos
+        // um índice uma vez, absorvemos tudo e ordenamos/persistimos só no fim.
+        const existentes = new Map();
+        for (const atual of this.resultados) {
+            const chave = this._ehAoVivo(atual) ? this._chaveTemporal(atual) : null;
+            if (chave) existentes.set(chave, atual);
+        }
+
+        let adicionados = 0, enriquecidos = 0;
+        for (const item of lista) {
+            const r = item && typeof item === "object" ? item : null;
+            if (!r?.placar || r?.fonte !== "ao-vivo" || !r?._temporal?.data || !r?._temporal?.horario || !r?.mandante || !r?.visitante) continue;
+
+            const metaTemporal = {
+                data: r._temporal.data,
+                horario: r._temporal.horario,
+                hora: r._temporal.hora,
+                minuto: r._temporal.minuto,
+                slot3: r._temporal.slot3,
+                timeZone: r._temporal.timeZone || "Europe/London"
+            };
+            const chave = `${metaTemporal.data}|${metaTemporal.horario}`;
+            const existente = existentes.get(chave);
+
+            if (existente) {
+                if (this._aplicarTimesResultado(existente, r)) enriquecidos++;
+                continue;
+            }
+
+            const resultado = this.criarResultado(r.placar, {
+                ...metaTemporal,
+                __fonte: "ao-vivo",
+                __remoto: true,
+                __dataCriacao: r.data || null
+            });
+            resultado.fonte = "ao-vivo";
+            this._aplicarTimesResultado(resultado, r);
+            this.resultados.push(resultado);
+            this.sequenciaAtual.push(resultado);
+            existentes.set(chave, resultado);
+            this.horariosSemDados = this.horariosSemDados.filter(x => x !== chave);
+            this.horariosSemDadosSessao = this.horariosSemDadosSessao.filter(x => x !== chave);
+            adicionados++;
+        }
+
+        this._ultimoEnriquecimentoTimes = enriquecidos;
+        if (adicionados || enriquecidos) {
+            this._sincronizarOrdemAtual();
+            if (salvar) this.persistir();
+        }
+        return adicionados;
+    },
+
+    persistir() {
+        if (typeof Armazenamento === "undefined") return false;
+        // Guarda uma janela ampla do histórico real para a interface nascer
+        // com contexto suficiente (casa/fora/H2H) sem depender da primeira
+        // resposta de rede. Continua limitado para não crescer indefinidamente.
+        const recentes = this.resultados
+            .filter(r => this._ehAoVivo(r) && this._chaveTemporal(r))
+            .slice(-500)
+            .map(r => ({
+                placar: r.placar,
+                _temporal: r._temporal,
+                fonte: "ao-vivo",
+                data: r.data || null,
+                mandante: r.mandante || null,
+                visitante: r.visitante || null,
+                escudoMandante: r.escudoMandante || null,
+                escudoVisitante: r.escudoVisitante || null,
+                liga: r.liga || null,
+                timesConfirmados: Boolean(r.mandante && r.visitante)
+            }));
+        Armazenamento.salvarDados(recentes);
+        Armazenamento.salvarMetadadosTemporais(recentes.map(x => x._temporal));
+        Armazenamento.salvarHorariosSemDados(this.horariosSemDados);
+        return true;
+    },
+
+    obterTodos() { return [...this.resultados]; },
+    obterUltimo() { return this.resultados.at(-1) || null; },
+    obterUltimoAoVivo() { return this.sequenciaAtual.at(-1) || null; },
+    obterQuantidade() { return this.resultados.length; },
+    obterQuantidadeSequencias() { return this.sequenciaAtual.length ? 1 : 0; },
+    obterSequenciaAtual() { return [...this.sequenciaAtual]; },
+    obterSequencias() { return this.sequenciaAtual.length ? [[...this.sequenciaAtual]] : []; },
+    obterDadosBrutos() { return [...this.dadosBrutos]; },
+
+    limpar(apagarStorage = true) {
+        this.resultados = [];
+        this.sequencias = [];
+        this.sequenciaAtual = [];
+        this.dadosBrutos = [];
+        this.baseEstudoQuantidade = 0;
+        this.baseEstudoBrutosIndice = 0;
+        this.metadadosTemporais = [];
+        this.horariosSemDados = [];
+        this.horariosSemDadosSessao = [];
+        if (apagarStorage && typeof Armazenamento !== "undefined") Armazenamento.limpar();
+    }
+};
+"use strict";
+const Calculos = {
+    percentual(n,t){ return t ? (n/t)*100 : 0; },
+    contarFrequenciaPlacar(resultados){
+        const mapa={}; resultados.forEach(r=>{ const p=typeof r==="string"?r:r?.placar; if(p) mapa[p]=(mapa[p]||0)+1; });
+        return Object.entries(mapa).map(([placar,quantidade])=>({placar,quantidade,percentual:this.percentual(quantidade,resultados.length)})).sort((a,b)=>b.quantidade-a.quantidade||a.placar.localeCompare(b.placar));
+    },
+    resumir(resultados){
+        const t=resultados.length; const c={casa:0,empate:0,fora:0,over25:0,under25:0,over35:0,under35:0,bttsSim:0,bttsNao:0}; const gols={0:0,1:0,2:0,3:0,4:0,5:0};
+        resultados.forEach(r=>{ const a=r.golsCasa, b=r.golsFora, g=a+b; if(a>b)c.casa++; else if(a===b)c.empate++; else c.fora++; g>2.5?c.over25++:c.under25++; g>3.5?c.over35++:c.under35++; a>0&&b>0?c.bttsSim++:c.bttsNao++; gols[Math.min(g,5)]++; });
+        return {total:t, ...Object.fromEntries(Object.entries(c).map(([k,v])=>[k,this.percentual(v,t)])), gols:Object.fromEntries(Object.entries(gols).map(([k,v])=>[k,this.percentual(v,t)]))};
+    },
+    totalMaisProvavel(resultados){ const mapa={}; resultados.forEach(r=>mapa[r.totalGols]=(mapa[r.totalGols]||0)+1); const e=Object.entries(mapa).sort((a,b)=>b[1]-a[1])[0]; return e?Number(e[0]):0; },
+    mediaGols(resultados){ return resultados.length ? resultados.reduce((s,r)=>s+r.totalGols,0)/resultados.length : 0; }
+};
+"use strict";
+const MercadoResultado1X2={
+  nome:'Resultado (1X2)',
+  transformar:r=>r.golsCasa>r.golsFora?'1':r.golsCasa===r.golsFora?'X':'2',
+  rotulo:v=>v==='1'?'Vitória da Casa':v==='X'?'Empate':'Vitória do Visitante',
+  analisar(resultados,contextoAtual=resultados){
+    const serie=resultados.map(this.transformar);
+    const contexto=(Array.isArray(contextoAtual)&&contextoAtual.length?contextoAtual:resultados).map(this.transformar);
+    const p=Padroes.analisarSerie(serie,contexto,{maxContext:10,minOccurrences:2,minConfidence:50,minMargin:1.0});
+    const f=Padroes.frequencias(p.amostra,['1','X','2']);
+    const fh=Padroes.frequencias(serie,['1','X','2']);
+    return {ativo:p.qualificado,padrao:p,frequencias:f,frequenciasHistorico:fh,palpite:p.qualificado?(f.lista[0]||null):null};
+  }
+};
+"use strict";
+const MercadoAmbosMarcam={
+  nome:'Ambos Marcam',
+  transformar:r=>r.golsCasa>0&&r.golsFora>0?'SIM':'NÃO',
+  rotulo:v=>v,
+  analisar(resultados,contextoAtual=resultados){
+    const serie=resultados.map(this.transformar);
+    const contexto=(Array.isArray(contextoAtual)&&contextoAtual.length?contextoAtual:resultados).map(this.transformar);
+    const p=Padroes.analisarSerie(serie,contexto,{maxContext:10,minOccurrences:2,minConfidence:55,minMargin:1.0});
+    const f=Padroes.frequencias(p.amostra,['SIM','NÃO']);
+    const fh=Padroes.frequencias(serie,['SIM','NÃO']);
+    return {ativo:p.qualificado,padrao:p,frequencias:f,frequenciasHistorico:fh,palpite:p.qualificado?(f.lista[0]||null):null};
+  }
+};
+"use strict";
+const MercadoOverUnder05={
+  nome:'Over / Under 0.5',
+  transformar:r=>r.totalGols>0.5?'MAIS':'MENOS',
+  rotulo:v=>v==='MAIS'?'Mais de 0.5':'Menos de 0.5',
+  analisar(resultados,contextoAtual=resultados){
+    const serie=resultados.map(this.transformar);
+    const contexto=(Array.isArray(contextoAtual)&&contextoAtual.length?contextoAtual:resultados).map(this.transformar);
+    const p=Padroes.analisarSerie(serie,contexto,{maxContext:10,minOccurrences:4,minConfidence:75,minMargin:1.08});
+    const f=Padroes.frequencias(p.amostra,['MAIS','MENOS']);
+    const fh=Padroes.frequencias(serie,['MAIS','MENOS']);
+    return {ativo:p.qualificado,padrao:p,frequencias:f,frequenciasHistorico:fh,palpite:p.qualificado?(f.lista[0]||null):null};
+  }
+};
+"use strict";
+
+/*
+ * ESPECIALISTA O/U 0.5 — FOCO U0.5
+ *
+ * Regras principais:
+ *  - olha SOMENTE a sequência binária O/U 0.5;
+ *  - 0x0 = UNDER 0.5 (MENOS), qualquer outro placar = OVER 0.5 (MAIS);
+ *  - depois da trava inicial da sessão, SEMPRE escolhe um lado (100% chamada);
+ *  - o objetivo raro é U0.5: sinais de Under recebem prioridade, mas não há
+ *    promessa de acerto; quando a evidência de Under não é suficiente, chama O;
+ *  - padrões binários são evidência auxiliar, não ordem obrigatória.
+ */
+const MercadoUnder05 = {
+  nome: "Especialista O/U 0.5 (foco U0.5)",
+
+  transformar(r) {
+    return Number(r?.totalGols) === 0 ? "MENOS" : "MAIS";
+  },
+
+  rotulo(v) {
+    return v === "MENOS" ? "Under 0.5" : "Over 0.5";
+  },
+
+  _taxaUnder(serie, prior = 0.10, forcaPrior = 10) {
+    const lista = Array.isArray(serie) ? serie : [];
+    const n = lista.length;
+    const u = lista.filter(v => v === "MENOS").length;
+    return (u + prior * forcaPrior) / Math.max(1, n + forcaPrior);
+  },
+
+  _padroes(serie, contextoAtual, taxaBase) {
+    const atual = Array.isArray(contextoAtual) ? contextoAtual : [];
+    const candidatos = [];
+    const max = Math.min(8, atual.length, Math.max(0, serie.length - 1));
+
+    for (let tamanho = 1; tamanho <= max; tamanho++) {
+      const contexto = atual.slice(-tamanho);
+      const ocorrencias = Padroes.encontrarOcorrencias(serie, contexto);
+      if (ocorrencias.length < 4) continue;
+
+      const seguintes = ocorrencias.map(o => serie[o.proximoIndice]).filter(Boolean);
+      const under = seguintes.filter(v => v === "MENOS").length;
+      const total = seguintes.length;
+      const taxaBruta = total ? under / total : taxaBase;
+      // Suavização para um padrão curto/pequeno não dominar o especialista.
+      const taxaSuavizada = (under + taxaBase * 12) / (total + 12);
+      const peso = Math.pow(tamanho, 1.25) * Math.min(1, total / 12);
+
+      candidatos.push({
+        tamanho,
+        contexto: [...contexto],
+        ocorrencias,
+        total,
+        under,
+        over: total - under,
+        taxaBruta,
+        taxaSuavizada,
+        peso
+      });
+    }
+
+    if (!candidatos.length) {
+      return { taxa: taxaBase, melhor: null, candidatos: [] };
+    }
+
+    const somaPeso = candidatos.reduce((s, x) => s + x.peso, 0) || 1;
+    const taxa = candidatos.reduce((s, x) => s + x.taxaSuavizada * x.peso, 0) / somaPeso;
+    const melhor = [...candidatos].sort((a, b) =>
+      b.tamanho - a.tamanho || b.total - a.total || b.taxaBruta - a.taxaBruta
+    )[0];
+
+    return { taxa, melhor, candidatos };
+  },
+
+  _taxaPorSequenciaOver(serie, contextoAtual, taxaBase) {
+    const atual = Array.isArray(contextoAtual) ? contextoAtual : [];
+    let corrida = 0;
+    for (let i = atual.length - 1; i >= 0 && atual[i] === "MAIS"; i--) corrida++;
+
+    const alvo = Math.min(corrida, 12);
+    const seguintes = [];
+    let run = 0;
+
+    // Estuda somente O/U: qual foi o resultado depois de uma corrida de Over
+    // do mesmo tamanho (12 representa 12 ou mais).
+    for (const v of serie) {
+      if (Math.min(run, 12) === alvo) seguintes.push(v);
+      run = v === "MAIS" ? run + 1 : 0;
+    }
+
+    return {
+      corrida,
+      amostra: seguintes.length,
+      taxa: seguintes.length
+        ? this._taxaUnder(seguintes, taxaBase, 15)
+        : taxaBase
+    };
+  },
+
+  analisar(resultados, contextoAtual = resultados) {
+    const base = Array.isArray(resultados) ? resultados : [];
+    const atualBruto = Array.isArray(contextoAtual) ? contextoAtual : [];
+
+    // A partir daqui, o especialista não enxerga placares: só MAIS/MENOS.
+    const serie = base.map(r => this.transformar(r));
+    const atual = atualBruto.map(r => this.transformar(r));
+
+    const frequenciasHistorico = Padroes.frequencias(serie, ["MAIS", "MENOS"]);
+
+    if (!serie.length) {
+      return {
+        ativo: false,
+        sempreChama: true,
+        focoUnder: true,
+        palpite: null,
+        probabilidades: { MAIS: 0, MENOS: 0 },
+        alertaUnder: { nivel: "SEM DADOS", indice: 0 },
+        padrao: { encontrado: false, contexto: [], tamanho: 0, ocorrencias: [], amostra: [], qualificado: false },
+        frequencias: Padroes.frequencias([], ["MAIS", "MENOS"]),
+        frequenciasHistorico,
+        metodo: "especialista-ou05-binario-foco-under-v1"
+      };
+    }
+
+    const taxaBase = this._taxaUnder(serie, 0.10, 10);
+    const taxa30 = this._taxaUnder(serie.slice(-30), taxaBase, 8);
+    const taxa80 = this._taxaUnder(serie.slice(-80), taxaBase, 12);
+    const padroes = this._padroes(serie, atual, taxaBase);
+    const corrida = this._taxaPorSequenciaOver(serie, atual, taxaBase);
+
+    // Mistura análise estatística + padrões binários. O padrão pesa, porém
+    // nunca é obedecido sozinho: ele apenas ajuda a decidir se vale elevar
+    // o alerta do evento raro U0.5.
+    let pUnder =
+      taxaBase * 0.34 +
+      taxa30 * 0.22 +
+      taxa80 * 0.10 +
+      padroes.taxa * 0.24 +
+      corrida.taxa * 0.10;
+
+    pUnder = Math.max(0.005, Math.min(0.45, pUnder));
+
+    const melhor = padroes.melhor;
+    const sinais = [
+      taxa30 >= taxaBase * 1.20,
+      padroes.taxa >= taxaBase * 1.20,
+      corrida.taxa >= taxaBase * 1.25
+    ].filter(Boolean).length;
+
+    const padraoUnderForte = Boolean(
+      melhor &&
+      melhor.tamanho >= 3 &&
+      melhor.total >= 8 &&
+      melhor.taxaBruta >= Math.max(0.24, taxaBase * 2.00)
+    );
+
+    // Threshold assimétrico: Under é raro, então não exigimos >50% para
+    // reconhecer um risco de U0.5. Mesmo assim pedimos evidências múltiplas
+    // para não transformar o especialista em um gerador de Under aleatório.
+    const limiteUnder = Math.max(0.16, taxaBase * 1.50);
+    const escolherUnder =
+      (padraoUnderForte && pUnder >= taxaBase * 1.20) ||
+      (pUnder >= limiteUnder && sinais >= 3);
+    const valor = escolherUnder ? "MENOS" : "MAIS";
+
+    const pctUnder = Number((pUnder * 100).toFixed(1));
+    const pctOver = Number((100 - pctUnder).toFixed(1));
+    const riscoRelativo = taxaBase > 0 ? pUnder / taxaBase : 1;
+    const indiceUnder = Number(Math.max(0, Math.min(100, 50 + (riscoRelativo - 1) * 80)).toFixed(0));
+    const nivel = escolherUnder
+      ? (padraoUnderForte ? "FORTE" : "ATIVO")
+      : (riscoRelativo >= 1.10 ? "ATENÇÃO" : "BAIXO");
+
+    const amostraPadrao = melhor
+      ? Array(melhor.under).fill("MENOS").concat(Array(melhor.over).fill("MAIS"))
+      : [];
+
+    return {
+      ativo: true,             // depois da trava dos 3 resultados, sempre chama
+      sempreChama: true,
+      focoUnder: true,
+      palpite: {
+        valor,
+        // Probabilidade do lado escolhido, não uma promessa de acerto.
+        percentual: valor === "MENOS" ? pctUnder : pctOver
+      },
+      probabilidades: { MAIS: pctOver, MENOS: pctUnder },
+      alertaUnder: {
+        nivel,
+        indice: indiceUnder,
+        sinais,
+        taxaBase: Number((taxaBase * 100).toFixed(1)),
+        taxa30: Number((taxa30 * 100).toFixed(1)),
+        taxa80: Number((taxa80 * 100).toFixed(1)),
+        taxaPadrao: Number((padroes.taxa * 100).toFixed(1)),
+        taxaCorrida: Number((corrida.taxa * 100).toFixed(1)),
+        corridaOver: corrida.corrida,
+        amostraCorrida: corrida.amostra
+      },
+      padrao: melhor ? {
+        encontrado: true,
+        contexto: [...melhor.contexto],
+        tamanho: melhor.tamanho,
+        ocorrencias: melhor.ocorrencias,
+        amostra: amostraPadrao,
+        percentual: Number((melhor.taxaBruta * 100).toFixed(1)),
+        taxaUnder: Number((melhor.taxaBruta * 100).toFixed(1)),
+        qualificado: padraoUnderForte,
+        apenasAuxiliar: true
+      } : {
+        encontrado: false,
+        contexto: atual.slice(-Math.min(8, atual.length)),
+        tamanho: 0,
+        ocorrencias: [],
+        amostra: [],
+        percentual: 0,
+        taxaUnder: 0,
+        qualificado: false,
+        apenasAuxiliar: true
+      },
+      frequencias: {
+        total: 1000,
+        mapa: { MAIS: Math.round(pctOver * 10), MENOS: Math.round(pctUnder * 10) },
+        lista: [
+          { valor: "MAIS", quantidade: Math.round(pctOver * 10), percentual: pctOver },
+          { valor: "MENOS", quantidade: Math.round(pctUnder * 10), percentual: pctUnder }
+        ].sort((a, b) => b.percentual - a.percentual)
+      },
+      frequenciasHistorico,
+      evidencias: padroes.candidatos,
+      metodo: "especialista-ou05-binario-foco-under-v1"
+    };
+  }
+};
+"use strict";
+const MercadoOverUnder15={
+  nome:'Over / Under 1.5',
+  transformar:r=>r.totalGols>1.5?'MAIS':'MENOS',
+  rotulo:v=>v==='MAIS'?'Mais de 1.5':'Menos de 1.5',
+  analisar(resultados,contextoAtual=resultados){
+    const serie=resultados.map(this.transformar);
+    const contexto=(Array.isArray(contextoAtual)&&contextoAtual.length?contextoAtual:resultados).map(this.transformar);
+    const p=Padroes.analisarSerie(serie,contexto,{maxContext:10,minOccurrences:2,minConfidence:60,minMargin:1.05});
+    const f=Padroes.frequencias(p.amostra,['MAIS','MENOS']);
+    const fh=Padroes.frequencias(serie,['MAIS','MENOS']);
+    return {ativo:p.qualificado,padrao:p,frequencias:f,frequenciasHistorico:fh,palpite:p.qualificado?(f.lista[0]||null):null};
+  }
+};
+"use strict";
+const MercadoOverUnder25={
+  nome:'Over / Under 2.5',
+  transformar:r=>r.totalGols>2.5?'MAIS':'MENOS',
+  rotulo:v=>v==='MAIS'?'Mais de 2.5':'Menos de 2.5',
+  analisar(resultados,contextoAtual=resultados){
+    const serie=resultados.map(this.transformar);
+    const contexto=(Array.isArray(contextoAtual)&&contextoAtual.length?contextoAtual:resultados).map(this.transformar);
+    const p=Padroes.analisarSerie(serie,contexto,{maxContext:10,minOccurrences:2,minConfidence:55,minMargin:1.0});
+    const f=Padroes.frequencias(p.amostra,['MAIS','MENOS']);
+    const fh=Padroes.frequencias(serie,['MAIS','MENOS']);
+    return {ativo:p.qualificado,padrao:p,frequencias:f,frequenciasHistorico:fh,palpite:p.qualificado?(f.lista[0]||null):null};
+  }
+};
+"use strict";
+
+/*
+ * UNDER 3.5 — motor independente do OVER 3.5.
+ *
+ * Este arquivo NÃO calcula MAIS. O MAIS de 3.5 pertence ao
+ * MercadoOver35 (over-3.5.js).
+ *
+ * O Under funciona também como FILTRO: quando um contexto semelhante
+ * historicamente chamou MENOS e depois saiu MAIS, o contexto fica
+ * temporariamente bloqueado para evitar repetir o mesmo erro.
+ */
+const MercadoOverUnder35 = {
+  nome: 'Under 3.5',
+  transformar(r) { return Number(r?.totalGols) < 3.5 ? 'MENOS' : 'MAIS'; },
+  rotulo(v) { return v === 'MENOS' ? 'Menos de 3.5' : 'Mais de 3.5'; },
+
+  _chaveContexto(contexto, tamanho) {
+    return contexto.slice(-tamanho).map(v => String(v)).join('|');
+  },
+
+  _historicoErros(serie, contexto) {
+    const erros = new Map();
+    const max = Math.min(10, contexto.length, serie.length - 1);
+    for (let tamanho = max; tamanho >= 1; tamanho--) {
+      const ctx = contexto.slice(-tamanho);
+      const ocorrencias = Padroes.encontrarOcorrencias(serie, ctx);
+      for (const o of ocorrencias) {
+        const previsto = 'MENOS';
+        const real = o.proximo;
+        const chave = this._chaveContexto(ctx, tamanho);
+        const item = erros.get(chave) || { total: 0, reds: 0, greens: 0 };
+        item.total++;
+        if (real === previsto) item.greens++;
+        else item.reds++;
+        erros.set(chave, item);
+      }
+    }
+    return erros;
+  },
+
+  analisar(resultados, contextoAtual = resultados) {
+    const serie = (resultados || []).map(this.transformar);
+    const contexto = (Array.isArray(contextoAtual) && contextoAtual.length ? contextoAtual : resultados || [])
+      .map(this.transformar);
+
+    const p = Padroes.analisarSerie(serie, contexto, {
+      maxContext: 10,
+      minOccurrences: 2,
+      minConfidence: 58,
+      minMargin: 1.05
+    });
+
+    const f = Padroes.frequencias(p.amostra, ['MENOS', 'MAIS']);
+    const fh = Padroes.frequencias(serie, ['MENOS', 'MAIS']);
+
+    let bloqueado = false;
+    let motivoBloqueio = '';
+    if (p.qualificado && p.tamanho) {
+      const chave = this._chaveContexto(contexto, p.tamanho);
+      const ocorrencias = Padroes.encontrarOcorrencias(serie, contexto.slice(-p.tamanho));
+      const reds = ocorrencias.filter(o => o.proximo === 'MAIS').length;
+      const total = ocorrencias.length;
+      // Só bloqueia quando existe evidência repetida de que o contexto
+      // que chamaria Under já produziu Over anteriormente.
+      if (total >= 2 && reds >= 1 && reds / total >= 0.34) {
+        bloqueado = true;
+        motivoBloqueio = `Contexto com ${reds}/${total} RED(s) anteriores do Under 3.5`;
+      }
+    }
+
+    const palpite = (!bloqueado && p.qualificado && p.amostra.length)
+      ? (f.lista.find(x => x.valor === 'MENOS') || f.lista[0] || null)
+      : null;
+
+    return {
+      ativo: Boolean(palpite),
+      bloqueado,
+      motivoBloqueio,
+      filtroUnder: true,
+      padrao: p,
+      frequencias: f,
+      frequenciasHistorico: fh,
+      palpite,
+      metodo: 'under35-filtro-reds-contexto'
+    };
+  }
+};
+"use strict";
+
+/*
+ * ESPECIALISTA OVER 3.5 — DISTÂNCIA DESDE O ÚLTIMO OVER
+ *
+ * Este mercado ignora placar exato e trabalha SOMENTE com a série binária:
+ *   MAIS  = 4 ou mais gols (Over 3.5)
+ *   MENOS = 0 a 3 gols     (Under 3.5)
+ *
+ * Gatilhos obtidos no teste fora da amostra:
+ *   - exatamente 5 MENOS consecutivos desde o último MAIS;
+ *   - de 10 a 13 MENOS consecutivos desde o último MAIS.
+ *
+ * A sequência exata de O/U é usada apenas como confirmação informativa;
+ * ela NÃO dispara entrada sozinha.
+ */
+const MercadoOver35 = {
+  nome: "Especialista O3.5",
+  ALVO: "MAIS",
+  METODO: "o35-distancia-desde-ultimo-over-v1",
+
+  transformar(r) {
+    const g = Number(r?.totalGols);
+    return Number.isFinite(g) && g >= 4 ? "MAIS" : "MENOS";
+  },
+
+  rotulo(v) {
+    return v === "MAIS" ? "Mais de 3.5" : "Menos de 3.5";
+  },
+
+  _ehPlacar(x) {
+    const p = typeof x === "string" ? x : x?.placar;
+    return typeof p === "string" && /^\d+x\d+$/i.test(p.trim());
+  },
+
+  _labelBruto(x) {
+    if (!this._ehPlacar(x)) return null;
+    const p = typeof x === "string" ? x : x.placar;
+    const [a, b] = p.toLowerCase().split("x").map(Number);
+    return a + b >= 4 ? "MAIS" : "MENOS";
+  },
+
+  _minutosTemporal(t) {
+    if (!t?.data || !t?.horario) return null;
+    const [h, m] = String(t.horario).split(":").map(Number);
+    if (!Number.isFinite(h) || !Number.isFinite(m)) return null;
+    const dia = Date.parse(`${t.data}T00:00:00Z`);
+    if (!Number.isFinite(dia)) return null;
+    return Math.floor(dia / 60000) + h * 60 + m;
+  },
+
+  /*
+   * Série contínua. PAUSAS antigas e intervalos sem registro não quebram mais
+   * o histórico; o tamanho desses intervalos é estudado pela AnaliseTemporal.
+   */
+  _serieComQuebras(resultados) {
+    const lista = Array.isArray(resultados) ? resultados : [];
+    return lista.map(r => this.transformar(r));
+  },
+
+  _corridaAtual(serie) {
+    let corrida = 0;
+    for (let i = serie.length - 1; i >= 0; i--) {
+      const v = serie[i];
+      if (v === "MAIS") break;
+      if (v === "MENOS") corrida++;
+    }
+    return corrida;
+  },
+
+  _faixa(corrida) {
+    if (corrida === 5) return "5";
+    if (corrida >= 10 && corrida <= 13) return "10-13";
+    return null;
+  },
+
+  _estatisticasPorFaixa(serie) {
+    const faixas = {
+      "5": { total: 0, over: 0 },
+      "10-13": { total: 0, over: 0 }
+    };
+    let corrida = 0;
+
+    for (const valor of serie) {
+      const faixa = this._faixa(corrida);
+      if (faixa) {
+        faixas[faixa].total++;
+        if (valor === "MAIS") faixas[faixa].over++;
+      }
+
+      corrida = valor === "MAIS" ? 0 : corrida + 1;
+    }
+
+    for (const x of Object.values(faixas)) {
+      x.taxa = x.total ? x.over / x.total : 0;
+    }
+    return faixas;
+  },
+
+  _confirmacaoSequencia(serie, tamanho = 3) {
+    const limpa = [];
+    for (let i = serie.length - 1; i >= 0 && limpa.length < tamanho; i--) {
+      limpa.unshift(serie[i]);
+    }
+    if (limpa.length < 2) return { contexto: limpa, total: 0, over: 0, taxa: 0 };
+
+    let total = 0, over = 0;
+    for (let i = 0; i + limpa.length < serie.length; i++) {
+      let ok = true;
+      for (let j = 0; j < limpa.length; j++) {
+        if (serie[i + j] !== limpa[j]) { ok = false; break; }
+      }
+      if (!ok) continue;
+      const prox = serie[i + limpa.length];
+      total++;
+      if (prox === "MAIS") over++;
+    }
+    return { contexto: limpa, total, over, taxa: total ? over / total : 0 };
+  },
+
+  analisar(resultados) {
+    const base = Array.isArray(resultados) ? resultados : [];
+    const alvos = base.map(r => this.transformar(r));
+    const frequenciasHistorico = typeof Padroes !== "undefined"
+      ? Padroes.frequencias(alvos, ["MAIS", "MENOS"])
+      : { lista: [] };
+
+    if (base.length < 12) {
+      return {
+        ativo: false,
+        especialista: true,
+        independente: true,
+        palpite: null,
+        padrao: { encontrado: false, contexto: [], tamanho: 0, ocorrencias: [], amostra: [], percentual: 0, qualificado: false },
+        frequencias: frequenciasHistorico,
+        frequenciasHistorico,
+        evidencias: [],
+        corridaUnder: 0,
+        faixaAtual: null,
+        metodo: this.METODO
+      };
+    }
+
+    const serie = this._serieComQuebras(base);
+    const corrida = this._corridaAtual(serie);
+    const faixa = this._faixa(corrida);
+    const stats = this._estatisticasPorFaixa(serie);
+    const confirmacao = this._confirmacaoSequencia(serie, 3);
+    const escolhido = faixa ? stats[faixa] : null;
+
+    // Regra operacional do teste: O3.5 é chamado SOMENTE nas distâncias
+    // 5 e 10–13 desde o último Over 3.5. Fora delas, aguarda.
+    const chamado = Boolean(faixa);
+    const taxaFaixa = escolhido?.taxa || 0;
+    const percentual = Number((taxaFaixa * 100).toFixed(1));
+
+    const amostra = escolhido
+      ? Array(escolhido.over).fill("MAIS").concat(Array(escolhido.total - escolhido.over).fill("MENOS"))
+      : [];
+    const frequencias = typeof Padroes !== "undefined"
+      ? Padroes.frequencias(amostra, ["MAIS", "MENOS"])
+      : frequenciasHistorico;
+
+    const ocorrencias = escolhido
+      ? Array.from({ length: escolhido.total }, (_, i) => ({ indice: i, proximoIndice: i + 1 }))
+      : [];
+
+    return {
+      ativo: chamado,
+      especialista: true,
+      independente: true,
+      palpite: chamado ? {
+        valor: "MAIS",
+        quantidade: escolhido?.over || 0,
+        percentual
+      } : null,
+      padrao: chamado ? {
+        encontrado: true,
+        contexto: [`${corrida} U3.5 consecutivos`],
+        tamanho: corrida,
+        ocorrencias,
+        amostra,
+        percentual,
+        qualificado: true,
+        faixa,
+        corridaUnder: corrida,
+        confirmacaoSequencia: confirmacao
+      } : {
+        encontrado: false,
+        contexto: [`${corrida} U3.5 consecutivos`],
+        tamanho: corrida,
+        ocorrencias: [],
+        amostra: [],
+        percentual: 0,
+        qualificado: false,
+        faixa: null,
+        corridaUnder: corrida,
+        confirmacaoSequencia: confirmacao
+      },
+      frequencias,
+      frequenciasHistorico,
+      evidencias: [
+        { faixa: "5", ...stats["5"] },
+        { faixa: "10-13", ...stats["10-13"] },
+        { tipo: "confirmacao-sequencia", ...confirmacao }
+      ],
+      corridaUnder: corrida,
+      faixaAtual: faixa,
+      metodo: this.METODO
+    };
+  }
+};
+"use strict";
+const MercadoPlacarExato={
+  nome:'Placar Exato',
+  transformar:r=>r.placar,
+  rotulo:v=>v,
+  _parse(v){const m=String(v||'').match(/^(\d+)x(\d+)$/);return m?{c:Number(m[1]),f:Number(m[2]),t:Number(m[1])+Number(m[2])}:null;},
+  analisar(resultados,contextoAtual=resultados){
+    const serie=(resultados||[]).map(this.transformar).filter(Boolean);
+    const contexto=(Array.isArray(contextoAtual)&&contextoAtual.length?contextoAtual:resultados||[]).map(this.transformar).filter(Boolean);
+    const p=Padroes.analisarSerie(serie,contexto,{maxContext:10,minOccurrences:2,minConfidence:18,minMargin:1.0});
+    const f=Padroes.frequencias(p.amostra,[]);
+    const fh=Padroes.frequencias(serie,[]);
+    if(!p.qualificado||!f.lista.length)return {ativo:false,padrao:p,frequencias:f,frequenciasHistorico:fh,palpite:null};
+
+    // Desempate: quando vários placares têm a mesma contagem, prioriza o lado
+    // indicado pelo 1X2 e a quantidade de gols indicada por Gols Exatos.
+    const r12=MercadoResultado1X2.analisar(resultados,contextoAtual);
+    const gols=MercadoGolsExatos.analisar(resultados,contextoAtual);
+    const bm=MercadoAmbosMarcam.analisar(resultados,contextoAtual);
+    const v12=r12?.palpite?.valor||null, vg=gols?.palpite?.valor==null?null:Number(gols.palpite.valor), vb=bm?.palpite?.valor||null;
+    const candidatos=f.lista.slice(0,Math.min(6,f.lista.length));
+    const pontuados=candidatos.map(item=>{
+      const x=this._parse(item.valor); let s=item.percentual;
+      if(!x)return {...item,score:s};
+      if(vg!==null && Number.isFinite(vg) && Math.min(5,x.t)===Math.min(5,vg))s+=4;
+      if(v12==='1'&&x.c>x.f)s+=3;
+      if(v12==='X'&&x.c===x.f)s+=3;
+      if(v12==='2'&&x.c<x.f)s+=3;
+      if(vb==='SIM'&&x.c>0&&x.f>0)s+=2;
+      if(vb==='NÃO'&&(x.c===0||x.f===0))s+=2;
+      return {...item,score:s};
+    }).sort((a,b)=>b.score-a.score||b.quantidade-a.quantidade);
+    const escolhido=pontuados[0];
+    return {ativo:true,padrao:p,frequencias:f,frequenciasHistorico:fh,palpite:{valor:escolhido.valor,quantidade:escolhido.quantidade,percentual:Math.min(99.9,escolhido.percentual)},metodo:'padrao-com-desempate-1x2-btts-total'};
+  }
+};
+"use strict";
+const MercadoGolsExatos={
+  nome:'Quantidade de Gols',
+  transformar(r){
+    if(typeof r==='string'){
+      const m=r.trim().match(/^(\d+)x(\d+)$/i); if(!m)return null;
+      return String(Math.min(5,Number(m[1])+Number(m[2])));
+    }
+    const total=Number(r?.totalGols); if(!Number.isFinite(total)||total<0)return null;
+    return String(Math.min(5,total));
+  },
+  rotulo(v){const n=Number(v);return n===5?'5 ou mais gols':`${n} gol${n===1?'':'s'}`;},
+  _ordem(){return ['0','1','2','3','4','5'];},
+  _frequencias(a){return Padroes.frequencias(a,this._ordem());},
+  _serie(r){return (Array.isArray(r)?r:[]).map(x=>this.transformar(x)).filter(v=>v!==null);},
+
+  /* Indicadores internos. Não são exibidos no layout. */
+  _analisarFaixa(resultados, contextoAtual, limite){
+    const serie=(resultados||[]).map(r=>Number(r?.totalGols)>limite?'MAIS':'MENOS');
+    const atual=(Array.isArray(contextoAtual)&&contextoAtual.length?contextoAtual:resultados||[])
+      .map(r=>Number(r?.totalGols)>limite?'MAIS':'MENOS');
+    const candidatos=[];
+    for(const tamanho of [8,7,6,5,4,3,2]){
+      if(atual.length<tamanho)continue;
+      const ctx=atual.slice(-tamanho);
+      const ocorrencias=Padroes.encontrarOcorrencias(serie,ctx);
+      if(ocorrencias.length<2)continue;
+      const mais=ocorrencias.filter(x=>x.proximo==='MAIS').length;
+      const taxa=mais*100/ocorrencias.length;
+      candidatos.push({tamanho,contexto:[...ctx],ocorrencias,mais,menos:ocorrencias.length-mais,taxa});
+    }
+    candidatos.sort((a,b)=>b.taxa-a.taxa||b.ocorrencias.length-a.ocorrencias.length||b.tamanho-a.tamanho);
+    const escolhido=candidatos[0]||null;
+    const f=Padroes.frequencias(escolhido?escolhido.ocorrencias.map(x=>x.proximo):[],['MAIS','MENOS']);
+    return {
+      ativo:Boolean(escolhido&&escolhido.taxa>=55),
+      padrao:escolhido?{encontrado:true,contexto:escolhido.contexto,tamanho:escolhido.tamanho,ocorrencias:escolhido.ocorrencias,amostra:escolhido.ocorrencias.map(x=>x.proximo),percentual:escolhido.taxa,qualificado:true}: {encontrado:false,contexto:atual.slice(-8),tamanho:0,ocorrencias:[],amostra:[],percentual:0,qualificado:false},
+      frequencias:f,
+      palpite:escolhido&&escolhido.taxa>=55?{valor:'MAIS',quantidade:escolhido.mais,percentual:Number(escolhido.taxa.toFixed(1))}:null,
+      limite
+    };
+  },
+
+  analisar(resultados,contextoAtual=resultados){
+    const serie=this._serie(resultados), atualPreferencial=this._serie(contextoAtual);
+    if(serie.length<2)return {ativo:false,padrao:{encontrado:false,contexto:[],tamanho:0,ocorrencias:[],amostra:[]},frequencias:this._frequencias([]),palpite:null,metodo:'padrao-adaptativo',indicadoresOcultos:{}};
+    const atual=atualPreferencial.length?atualPreferencial:serie;
+    const p=Padroes.analisarSerie(serie,atual,{maxContext:10,minOccurrences:2,minConfidence:20,minMargin:1.0});
+    const frequencias=this._frequencias(p.amostra);
+    const frequenciasHistorico=this._frequencias(serie);
+    const indicadoresOcultos={
+      ou45:this._analisarFaixa(resultados,contextoAtual,4.5),
+      ou55:this._analisarFaixa(resultados,contextoAtual,5.5)
+    };
+
+    // Coerência entre mercados: O2.5 + U3.5 é uma faixa muito específica
+    // (3 gols). Em vez de ignorar esse sinal, ele desempata o total exato.
+    const ou25=MercadoOverUnder25.analisar(resultados,contextoAtual);
+    const u35=MercadoOverUnder35.analisar(resultados,contextoAtual);
+    const o25v=ou25?.palpite?.valor||null;
+    const u35v=u35?.palpite?.valor||null;
+    const candidatos=frequencias.lista.slice(0,Math.min(6,frequencias.lista.length)).map(x=>({ ...x, score:x.percentual }));
+    for(const c of candidatos){
+      const n=Number(c.valor);
+      if(o25v==='MAIS' && u35v==='MENOS' && n===3) c.score+=12;
+      if(o25v==='MENOS' && n<=2) c.score+=5;
+      if(indicadoresOcultos.ou45?.palpite?.valor==='MAIS' && n>=5) c.score+=5;
+      if(indicadoresOcultos.ou45?.palpite?.valor==='MENOS' && n<=4) c.score+=2;
+      if(indicadoresOcultos.ou55?.palpite?.valor==='MAIS' && n===5) c.score+=4;
+    }
+    candidatos.sort((a,b)=>b.score-a.score||b.quantidade-a.quantidade);
+    const escolhido=p.qualificado && candidatos[0] ? candidatos[0] : null;
+    return {ativo:Boolean(escolhido),padrao:p,frequencias,frequenciasHistorico,palpite:escolhido?{valor:escolhido.valor,quantidade:escolhido.quantidade,percentual:Math.min(99.9,escolhido.percentual)}:null,metodo:'padrao-adaptativo-coerencia-mercados',indicadoresOcultos,coerencia:{ou25:o25v,u35:u35v}};
+  }
+};
+"use strict";
+
+/*
+ * MOTOR DE PADRÕES ADAPTATIVO
+ *
+ * A estrutura do aplicativo permanece a mesma. Esta camada altera somente
+ * as métricas usadas para liberar uma previsão:
+ *   - tamanho máximo do contexto;
+ *   - número mínimo de ocorrências;
+ *   - confiança mínima;
+ *   - vantagem mínima sobre a segunda opção.
+ *
+ * Cada mercado passa seus próprios parâmetros. Portanto, um mercado não
+ * depende da previsão atual de outro mercado.
+ */
+const Padroes = {
+  CONFIG_PADRAO:{maxContext:6,minOccurrences:4,minConfidence:60,minMargin:1.08},
+
+  encontrarOcorrencias(serie, contexto){
+    const achados=[];
+    const n=contexto.length;
+    if(!n || serie.length<=n) return achados;
+    for(let i=0;i+n<serie.length;i++){
+      let ok=true;
+      for(let j=0;j<n;j++){
+        if(serie[i+j]!==contexto[j]){ok=false;break;}
+      }
+      if(ok) achados.push({inicio:i,fim:i+n-1,proximoIndice:i+n,proximo:serie[i+n]});
+    }
+    return achados;
+  },
+
+  analisarSerie(serie, contextoAtual, opcoes={}){
+    if(!Array.isArray(serie)||!serie.length){
+      return {encontrado:false,contexto:[],tamanho:0,ocorrencias:[],amostra:[],confianca:0,qualificado:false,percentual:0,frequenciasHistorico:this.frequencias(serie||[],[])};
+    }
+    const cfg={...this.CONFIG_PADRAO,...(opcoes||{})};
+    const atual=Array.isArray(contextoAtual)&&contextoAtual.length?contextoAtual:serie;
+    if(!atual.length) return {encontrado:false,contexto:[],tamanho:0,ocorrencias:[],amostra:[],confianca:0,qualificado:false,percentual:0,frequenciasHistorico:this.frequencias(serie,[])};
+
+    const maximo=Math.min(Number(cfg.maxContext)||1,atual.length,serie.length-1);
+
+    // Tenta o maior contexto primeiro. Se ele existir, mas não atingir os
+    // critérios, desce para contextos menores até encontrar evidência válida.
+    for(let tamanho=maximo;tamanho>=1;tamanho--){
+      const contexto=atual.slice(-tamanho);
+      const ocorrencias=this.encontrarOcorrencias(serie,contexto);
+      if(ocorrencias.length < Number(cfg.minOccurrences||1)) continue;
+
+      const amostra=ocorrencias.map(x=>x.proximo);
+      const frequencias=this.frequencias(amostra,[]);
+      const dominante=frequencias.lista[0]||null;
+      if(!dominante) continue;
+      const segundo=frequencias.lista[1]||null;
+      const margem=dominante.quantidade/(segundo?segundo.quantidade:1);
+      const confianca=dominante.percentual;
+
+      if(confianca < Number(cfg.minConfidence||0)) continue;
+      if(margem < Number(cfg.minMargin||1)) continue;
+
+      return {
+        encontrado:true,
+        frequenciasHistorico:this.frequencias(serie,[]),
+        contexto:[...contexto],
+        tamanho,
+        ocorrencias,
+        amostra,
+        confianca,
+        percentual:confianca,
+        margem,
+        qualificado:true,
+        minimoOcorrencias:Number(cfg.minOccurrences||1),
+        confiancaMinima:Number(cfg.minConfidence||0),
+        margemMinima:Number(cfg.minMargin||1)
+      };
+    }
+
+    return {encontrado:false,contexto:atual.slice(-maximo),tamanho:0,ocorrencias:[],amostra:[],confianca:0,percentual:0,qualificado:false,frequenciasHistorico:this.frequencias(serie,[])};
+  },
+
+  frequencias(amostra, ordem=[]){
+    const mapa={};
+    (amostra||[]).forEach(v=>mapa[v]=(mapa[v]||0)+1);
+    const total=(amostra||[]).length;
+    const lista=Object.entries(mapa)
+      .map(([valor,quantidade])=>({valor,quantidade,percentual:total?quantidade*100/total:0,ordem:ordem.indexOf(valor)}))
+      .sort((a,b)=>b.quantidade-a.quantidade||a.ordem-b.ordem||String(a.valor).localeCompare(String(b.valor)));
+    return {total,lista,mapa};
+  }
+};
+"use strict";
+/* Relógio das partidas: fuso Europe/London e ciclos de 3 minutos.
+ * A âncora confirmada pelo usuário é 02:57; os horários seguintes são +3 min.
+ * O slot muda somente quando o relógio chega ao horário da partida.
+ * A janela de 1min15 antes da próxima partida é exclusiva do registro
+ * do resultado da partida encerrada; ela não controla as previsões.
+ */
+const RelogioPartidas = {
+  TIME_ZONE: 'Europe/London',
+  ANCHOR_MINUTES: 2 * 60 + 57,
+  JANELA_REGISTRO_RESULTADO_SEGUNDOS: 75,
+  _timer: null,
+  _listeners: new Set(),
+  _dateFormatter: null,
+  _timeFormatter: null,
+  _garantirFormatadores(){
+    if(!this._dateFormatter) this._dateFormatter=new Intl.DateTimeFormat('en-CA',{timeZone:this.TIME_ZONE,year:'numeric',month:'2-digit',day:'2-digit'});
+    if(!this._timeFormatter) this._timeFormatter=new Intl.DateTimeFormat('en-GB',{timeZone:this.TIME_ZONE,hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false});
+  },
+  _fmtDate(d=new Date()) { this._garantirFormatadores(); return this._dateFormatter.format(d); },
+  _parts(d=new Date()) {
+    this._garantirFormatadores();
+    const p=this._timeFormatter.formatToParts(d);
+    const o={}; for(const x of p) o[x.type]=x.value; return {hour:Number(o.hour),minute:Number(o.minute),second:Number(o.second)};
+  },
+  agora(d=new Date()) { const p=this._parts(d); return {...p,data:this._fmtDate(d),timeZone:this.TIME_ZONE}; },
+  _slotMinute(minute) {
+    let delta=(minute-this.ANCHOR_MINUTES)%3; if(delta<0)delta+=3;
+    return minute-delta;
+  },
+  _shiftDate(data, days) {
+    if (!days) return data;
+    const [y,m,day]=String(data).split('-').map(Number);
+    const d=new Date(Date.UTC(y,m-1,day));
+    d.setUTCDate(d.getUTCDate()+days);
+    return `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,'0')}-${String(d.getUTCDate()).padStart(2,'0')}`;
+  },
+  _slot(a, extra=0) {
+    let m=this._slotMinute(a.minute)+extra, h=a.hour, dayShift=0;
+    while(m>=60){m-=60;h++;}
+    while(m<0){m+=60;h--;}
+    while(h>=24){h-=24;dayShift++;}
+    while(h<0){h+=24;dayShift--;}
+    return {data:this._shiftDate(a.data,dayShift),horario:`${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`,hora:h,minuto:m,segundo:a.second,timeZone:this.TIME_ZONE};
+  },
+  _addMinutes(slot,n){
+    let total=slot.hora*60+slot.minuto+n, dayShift=0;
+    while(total>=1440){total-=1440;dayShift++;}
+    while(total<0){total+=1440;dayShift--;}
+    const h=Math.floor(total/60), m=total%60;
+    return {data:this._shiftDate(slot.data,dayShift),horario:`${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`,hora:h,minuto:m,timeZone:this.TIME_ZONE};
+  },
+  partidaAtual(d=new Date()) {
+    // O slot só muda quando o relógio realmente chega ao início da próxima partida.
+    // Os últimos 75 segundos do slot anterior são apenas a janela para liberar o registro do resultado.
+    const a=this.agora(d);
+    return this._slot(a,0);
+  },
+  partidaAnterior(d=new Date()) { const atual=this.partidaAtual(d); return this._addMinutes(atual,-3); },
+  proximaPartida(d=new Date()) { const atual=this.partidaAtual(d); return this._addMinutes(atual,3); },
+  partidaParaRegistrarResultado(d=new Date()) { return this.partidaAtual(d); },
+  segundosAteProximaPartida(d=new Date()) {
+    const a=this.agora(d);
+    const offset=((a.minute-this.ANCHOR_MINUTES)%3+3)%3;
+    const minutosRestantes=3-offset;
+    return minutosRestantes*60-a.second;
+  },
+  janelaRegistroResultadoAberta(d=new Date()) {
+    const restante=this.segundosAteProximaPartida(d);
+    return restante > 0 && restante <= this.JANELA_REGISTRO_RESULTADO_SEGUNDOS;
+  },
+  horarioLiberacaoRegistro(d=new Date()) {
+    const n=this.proximaPartida(d);
+    let total=((n.hora*60+n.minuto)*60)-this.JANELA_REGISTRO_RESULTADO_SEGUNDOS;
+    let data=n.data;
+    while(total<0){total+=86400;data=this._shiftDate(data,-1);}
+    while(total>=86400){total-=86400;data=this._shiftDate(data,1);}
+    const h=Math.floor(total/3600);
+    const m=Math.floor((total%3600)/60);
+    const sec=total%60;
+    return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`;
+  },
+  slotPorHorario(horario, data=null) {
+    if(!/^\d{2}:\d{2}$/.test(String(horario||''))) return null;
+    const [h,m]=String(horario).split(':').map(Number);
+    if(h>23 || m>59) return null;
+    const baseData = data || this.agora().data;
+    const esperado=this._slotMinute(m);
+    if(esperado!==m) return null;
+    return {data:baseData,horario:`${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`,hora:h,minuto:m,timeZone:this.TIME_ZONE};
+  },
+  chave(slot){return `${slot.data}|${slot.horario}`;},
+  iniciar(){
+    if(this._timer)return;
+    const tick=()=>{
+      // Calcula o relógio uma única vez por segundo. Antes, agora()/partidaAtual()/
+      // proximaPartida() recriavam várias leituras de fuso no mesmo tick.
+      const a=this.agora();
+      const atual=this._slot(a,0);
+      const proxima=this._addMinutes(atual,3);
+      for(const fn of this._listeners){try{fn(a,atual,proxima);}catch(e){console.error(e)}}
+    };
+    tick(); this._timer=setInterval(tick,1000);
+  },
+  observar(fn){if(typeof fn==='function')this._listeners.add(fn); return ()=>this._listeners.delete(fn);}
+};
+"use strict";
+
+/*
+ * APRENDIZADO TEMPORAL CONTÍNUO
+ *
+ * O horário deixa de ser apenas separador de sessão e passa a produzir sinais
+ * para cada mercado. A camada observa:
+ * - horário exato e faixas de 3/15/30/60/120 minutos;
+ * - período do dia e dia da semana;
+ * - minutos desde o último resultado registrado;
+ * - quantidade de slots de 3 minutos sem resultado;
+ * - ritmo recente (média dos últimos intervalos) e aceleração/desaceleração;
+ * - último resultado daquele mercado e tamanho da repetição atual;
+ * - tempo desde a última ocorrência de cada lado possível do mercado.
+ *
+ * A sessão é contínua: intervalos sem registro são DADOS, não quebras.
+ * O temporal pode bloquear uma entrada apenas quando existe evidência forte,
+ * com boa amostra e tendência CONTRÁRIA ao palpite principal.
+ */
+const AnaliseTemporal = {
+  MIN_AMOSTRA_EXIBIR: 30,
+  MIN_AMOSTRA_FILTRO: 80,
+  MIN_SINAL: 6,
+  MIN_SINAL_FORTE: 10,
+  PCT_SINAL_FORTE: 62,
+  MIN_VETO: 12,
+  PCT_VETO: 72,
+  _cache: new Map(),
+
+  _minutosAbsolutos(t) {
+    if (!t?.data || !t?.horario) return null;
+    const [h, m] = String(t.horario).split(":").map(Number);
+    if (!Number.isFinite(h) || !Number.isFinite(m)) return null;
+    const dia = Date.parse(`${t.data}T00:00:00Z`);
+    if (!Number.isFinite(dia)) return null;
+    return Math.floor(dia / 60000) + h * 60 + m;
+  },
+
+  _chaveTemporal(r) {
+    const t = r?._temporal;
+    return t?.data && t?.horario ? `${t.data}|${t.horario}` : null;
+  },
+
+  _ordenar(resultados) {
+    return (resultados || [])
+      .filter(r => this._chaveTemporal(r))
+      .slice()
+      .sort((a, b) => this._chaveTemporal(a).localeCompare(this._chaveTemporal(b)));
+  },
+
+  _valoresMercado(k) {
+    if (k === "r12") return ["1", "X", "2"];
+    if (k === "bm") return ["SIM", "NÃO"];
+    if (k === "gols") return ["0", "1", "2", "3", "4", "5"];
+    if (["ou05", "under05", "ou15", "ou25", "ou35", "over35"].includes(k)) return ["MAIS", "MENOS"];
+    return [];
+  },
+
+  _resultadoMercado(r, k) {
+    const g = Number(r?.totalGols);
+    if (!Number.isFinite(g)) return null;
+    if (k === "ou05" || k === "under05") return g > 0 ? "MAIS" : "MENOS";
+    if (k === "ou15") return g > 1 ? "MAIS" : "MENOS";
+    if (k === "ou25") return g > 2 ? "MAIS" : "MENOS";
+    if (k === "ou35" || k === "over35") return g > 3 ? "MAIS" : "MENOS";
+    if (k === "gols") return String(Math.min(5, g));
+    if (k === "exato") return r?.placar || null;
+    if (k === "bm") return r.golsCasa > 0 && r.golsFora > 0 ? "SIM" : "NÃO";
+    if (k === "r12") return r.golsCasa > r.golsFora ? "1" : r.golsCasa < r.golsFora ? "2" : "X";
+    return null;
+  },
+
+  _faixaGap(min) {
+    if (!Number.isFinite(min)) return "SEM_ANTERIOR";
+    if (min <= 3) return "3";
+    if (min <= 6) return "4-6";
+    if (min <= 9) return "7-9";
+    if (min <= 15) return "10-15";
+    if (min <= 30) return "16-30";
+    if (min <= 60) return "31-60";
+    return "61+";
+  },
+
+  _faixaSlots(n) {
+    if (!Number.isFinite(n) || n <= 0) return "0";
+    if (n === 1) return "1";
+    if (n <= 3) return "2-3";
+    if (n <= 6) return "4-6";
+    if (n <= 10) return "7-10";
+    return "11+";
+  },
+
+  _faixaRitmo(media) {
+    if (!Number.isFinite(media)) return "SEM_RITMO";
+    if (media <= 3.5) return "CONTINUO";
+    if (media <= 6.5) return "RAPIDO";
+    if (media <= 12) return "MODERADO";
+    if (media <= 30) return "LENTO";
+    return "MUITO_LENTO";
+  },
+
+  _chavesHorario(t) {
+    if (!t?.data || !t?.horario) return {};
+    const [h, m] = String(t.horario).split(":").map(Number);
+    if (!Number.isFinite(h) || !Number.isFinite(m)) return {};
+    const minuto = h * 60 + m;
+    const periodo = h < 6 ? "MADRUGADA" : h < 12 ? "MANHÃ" : h < 18 ? "TARDE" : "NOITE";
+    const diaSemana = new Date(`${t.data}T12:00:00Z`).getUTCDay();
+    const faixa = (n) => Math.floor(minuto / n) * n;
+    return {
+      exato: `EXATO:${t.horario}`,
+      slot3: `3MIN:${String(Math.floor(minuto / 3) * 3).padStart(4, "0")}`,
+      faixa15: `15MIN:${String(faixa(15)).padStart(4, "0")}`,
+      faixa30: `30MIN:${String(faixa(30)).padStart(4, "0")}`,
+      faixa60: `1H:${String(faixa(60)).padStart(4, "0")}`,
+      faixa120: `2H:${String(faixa(120)).padStart(4, "0")}`,
+      minutoHora: `MINUTO_HORA:${String(Math.floor(m / 15) * 15).padStart(2, "0")}`,
+      periodo: `PERIODO:${periodo}`,
+      semana: `SEMANA:${diaSemana}`
+    };
+  },
+
+  _contexto(anteriores, k, alvoTemporal) {
+    const lista = this._ordenar(anteriores);
+    const horario = this._chavesHorario(alvoTemporal);
+    const alvoMin = this._minutosAbsolutos(alvoTemporal);
+    const ultimo = lista.at(-1) || null;
+    const ultimoMin = ultimo ? this._minutosAbsolutos(ultimo._temporal) : null;
+    const gapMin = Number.isFinite(alvoMin) && Number.isFinite(ultimoMin) ? Math.max(0, alvoMin - ultimoMin) : null;
+    const slotsSemResultado = Number.isFinite(gapMin) ? Math.max(0, Math.floor(gapMin / 3) - 1) : 0;
+
+    const gaps = [];
+    for (let i = Math.max(1, lista.length - 6); i < lista.length; i++) {
+      const a = this._minutosAbsolutos(lista[i - 1]?._temporal);
+      const b = this._minutosAbsolutos(lista[i]?._temporal);
+      if (Number.isFinite(a) && Number.isFinite(b) && b >= a) gaps.push(b - a);
+    }
+    const ultimos5 = gaps.slice(-5);
+    const mediaGap5 = ultimos5.length ? ultimos5.reduce((s, n) => s + n, 0) / ultimos5.length : null;
+    const mediaAnterior = ultimos5.length > 1 ? ultimos5.slice(0, -1).reduce((s, n) => s + n, 0) / (ultimos5.length - 1) : null;
+    let tendenciaRitmo = "SEM_TENDENCIA";
+    if (Number.isFinite(gapMin) && Number.isFinite(mediaAnterior) && mediaAnterior > 0) {
+      if (gapMin >= mediaAnterior * 1.5) tendenciaRitmo = "DESACELEROU";
+      else if (gapMin <= mediaAnterior * 0.7) tendenciaRitmo = "ACELEROU";
+      else tendenciaRitmo = "ESTAVEL";
+    }
+
+    const ultimoValor = ultimo ? this._resultadoMercado(ultimo, k) : null;
+    let corrida = 0;
+    if (ultimoValor != null) {
+      for (let i = lista.length - 1; i >= 0; i--) {
+        if (this._resultadoMercado(lista[i], k) !== ultimoValor) break;
+        corrida++;
+      }
+    }
+
+    const ausencia = {};
+    for (const valor of this._valoresMercado(k)) {
+      let achou = null;
+      for (let i = lista.length - 1; i >= 0; i--) {
+        if (this._resultadoMercado(lista[i], k) === valor) {
+          achou = this._minutosAbsolutos(lista[i]._temporal);
+          break;
+        }
+      }
+      ausencia[valor] = Number.isFinite(alvoMin) && Number.isFinite(achou) ? Math.max(0, alvoMin - achou) : null;
+    }
+
+    const chaves = {
+      ...horario,
+      gap: `GAP:${this._faixaGap(gapMin)}`,
+      slotsVazios: `SLOTS_SEM_RESULTADO:${this._faixaSlots(slotsSemResultado)}`,
+      ritmo5: `RITMO5:${this._faixaRitmo(mediaGap5)}`,
+      tendenciaRitmo: `TENDENCIA_RITMO:${tendenciaRitmo}`,
+      ultimoValor: ultimoValor == null ? null : `ULTIMO:${ultimoValor}`,
+      corrida: ultimoValor == null ? null : `CORRIDA:${ultimoValor}:${Math.min(corrida, 6)}${corrida > 6 ? "+" : ""}`
+    };
+    for (const [valor, min] of Object.entries(ausencia)) {
+      chaves[`ausencia_${valor}`] = `AUSENCIA:${valor}:${this._faixaGap(min)}`;
+    }
+
+    return { chaves, gapMin, slotsSemResultado, mediaGap5, tendenciaRitmo, ultimoValor, corrida, ausencia };
+  },
+
+  _assinatura(resultados, k) {
+    const lista = this._ordenar(resultados);
+    const u = lista.at(-1);
+    return `${k}|${lista.length}|${u ? this._chaveTemporal(u) : "-"}|${u?.placar || "-"}`;
+  },
+
+  _construirGrupos(resultados, k) {
+    const assinatura = this._assinatura(resultados, k);
+    if (this._cache.has(assinatura)) return this._cache.get(assinatura);
+
+    const lista = this._ordenar(resultados);
+    const grupos = {};
+    for (let i = 1; i < lista.length; i++) {
+      const alvo = lista[i];
+      const valor = this._resultadoMercado(alvo, k);
+      if (valor == null) continue;
+      const ctx = this._contexto(lista.slice(0, i), k, alvo._temporal);
+      for (const [tipo, chave] of Object.entries(ctx.chaves)) {
+        if (!chave) continue;
+        const g = grupos[chave] || (grupos[chave] = { tipo, chave, total: 0, contagem: {} });
+        g.total++;
+        g.contagem[valor] = (g.contagem[valor] || 0) + 1;
+      }
+    }
+
+    const pacote = { assinatura, lista, grupos };
+    this._cache.set(assinatura, pacote);
+    // Evita crescimento infinito se o app ficar aberto por muitos dias.
+    if (this._cache.size > 60) this._cache.delete(this._cache.keys().next().value);
+    return pacote;
+  },
+
+  _pesoTipo(tipo) {
+    if (String(tipo).startsWith("ausencia_")) return 1.30;
+    if (["gap", "slotsVazios", "ritmo5", "tendenciaRitmo", "corrida"].includes(tipo)) return 1.22;
+    if (tipo === "ultimoValor") return 1.12;
+    if (["faixa15", "faixa30", "faixa60"].includes(tipo)) return 1.08;
+    if (tipo === "exato" || tipo === "slot3") return 0.96;
+    return 1;
+  },
+
+  analisar(resultados, k, proximo) {
+    const base = Array.isArray(resultados) ? resultados : [];
+    const timestamped = this._ordenar(base);
+    const faltam = Math.max(0, this.MIN_AMOSTRA_EXIBIR - timestamped.length);
+    const contexto = this._contexto(timestamped, k, proximo?._temporal || proximo);
+
+    if (timestamped.length < this.MIN_AMOSTRA_EXIBIR) {
+      return {
+        disponivel: false,
+        amostra: timestamped.length,
+        faltam,
+        modo: "coletando",
+        contexto,
+        sinais: [],
+        forte: null,
+        texto: `🕐 Temporal coletando dados: ${timestamped.length}/${this.MIN_AMOSTRA_EXIBIR} resultados com horário. ${Number.isFinite(contexto.gapMin) ? `Último registro há ${contexto.gapMin} min · ${contexto.slotsSemResultado} slot(s) sem resultado.` : ""}`.trim()
+      };
+    }
+
+    const { grupos } = this._construirGrupos(timestamped, k);
+    const sinais = [];
+    for (const [tipo, chave] of Object.entries(contexto.chaves)) {
+      if (!chave) continue;
+      const g = grupos[chave];
+      if (!g || g.total < this.MIN_SINAL) continue;
+      const lista = Object.entries(g.contagem)
+        .map(([valor, n]) => ({ valor, n, percentual: n / g.total * 100 }))
+        .sort((a, b) => b.n - a.n);
+      const top = lista[0];
+      if (!top) continue;
+      const confianca = top.percentual * Math.log2(g.total + 1) * this._pesoTipo(tipo);
+      sinais.push({ tipo, chave, tendencia: top.valor, percentual: top.percentual, amostra: g.total, confianca });
+    }
+
+    sinais.sort((a, b) => b.confianca - a.confianca || b.percentual - a.percentual || b.amostra - a.amostra);
+    const fortes = sinais.filter(x => x.amostra >= this.MIN_SINAL_FORTE && x.percentual >= this.PCT_SINAL_FORTE);
+
+    // Consenso: evita confiar em um único recorte isolado. Soma confiança por lado.
+    const consenso = {};
+    for (const s of sinais.slice(0, 12)) {
+      const peso = (s.percentual / 100) * Math.log2(s.amostra + 1) * this._pesoTipo(s.tipo);
+      consenso[s.tendencia] = (consenso[s.tendencia] || 0) + peso;
+    }
+    const ranking = Object.entries(consenso).sort((a, b) => b[1] - a[1]);
+    const consensoTop = ranking[0]?.[0] || null;
+    const forte = fortes.find(s => s.tendencia === consensoTop) || fortes[0] || null;
+
+    const partes = [];
+    if (Number.isFinite(contexto.gapMin)) partes.push(`último resultado há ${contexto.gapMin} min`);
+    partes.push(`${contexto.slotsSemResultado} slot(s) sem resultado`);
+    if (Number.isFinite(contexto.mediaGap5)) partes.push(`ritmo médio ${contexto.mediaGap5.toFixed(1)} min`);
+    if (contexto.tendenciaRitmo !== "SEM_TENDENCIA") partes.push(contexto.tendenciaRitmo.toLowerCase());
+
+    return {
+      disponivel: true,
+      amostra: timestamped.length,
+      faltamFiltro: Math.max(0, this.MIN_AMOSTRA_FILTRO - timestamped.length),
+      modo: timestamped.length >= this.MIN_AMOSTRA_FILTRO ? "ativo" : "observacao",
+      contexto,
+      sinais,
+      fortes,
+      forte,
+      consenso: ranking,
+      texto: forte
+        ? `🕐 Temporal: ${forte.tendencia} em destaque (${forte.percentual.toFixed(1)}% / ${forte.amostra} casos) · ${partes.join(" · ")}.`
+        : `🕐 Temporal sem consenso forte · ${partes.join(" · ")}.`
+    };
+  },
+
+  _aplicarFiltro(m, temporal) {
+    if (!m || !temporal) return m;
+    m.temporal = temporal;
+    if (!(m.ativo && m.palpite) || !temporal.disponivel || !temporal.forte) return m;
+
+    const previsto = String(m.palpite.valor);
+    const forte = temporal.forte;
+    const apoia = String(forte.tendencia) === previsto;
+    temporal.acao = apoia ? "apoia" : "contraria";
+
+    const podeVetar = temporal.amostra >= this.MIN_AMOSTRA_FILTRO &&
+      forte.amostra >= this.MIN_VETO && forte.percentual >= this.PCT_VETO;
+
+    if (!apoia && podeVetar) {
+      m.palpiteAntesTemporal = { ...m.palpite };
+      m.bloqueadoTemporal = true;
+      m.motivoBloqueioTemporal = `Temporal contrário: ${forte.tendencia} ${forte.percentual.toFixed(1)}% em ${forte.amostra} casos`;
+      m.palpite = null;
+      m.ativo = false;
+      temporal.acao = "veto";
+      temporal.texto += " ⛔ Filtro temporal evitou esta entrada.";
+    } else if (apoia) {
+      temporal.texto += " ✅ Horário/ritmo apoiam o palpite principal.";
+    }
+    return m;
+  },
+
+  anexar(resultados, mercados, proximo) {
+    for (const [k, m] of Object.entries(mercados || {})) {
+      const temporal = this.analisar(resultados, k, proximo);
+      this._aplicarFiltro(m, temporal);
+    }
+    return mercados;
+  }
+};
+"use strict";
+const Previsoes={
+ gerar(resultados, sequenciaAtual=null, opcoes={}){
+   // O histórico completo é a base de aprendizado. A sequência atual não pode limitar a consulta ao backup.
+   const atual = Array.isArray(sequenciaAtual) && sequenciaAtual.length ? sequenciaAtual : (Array.isArray(resultados) ? resultados.slice(-10) : []);
+   const mercados={
+     exato:MercadoPlacarExato.analisar(resultados,atual),
+     gols:MercadoGolsExatos.analisar(resultados,atual),
+     r12:MercadoResultado1X2.analisar(resultados,atual),
+     bm:MercadoAmbosMarcam.analisar(resultados,atual),
+     ou05:MercadoOverUnder05.analisar(resultados,atual),
+     under05:MercadoUnder05.analisar(resultados,atual),
+     ou15:MercadoOverUnder15.analisar(resultados,atual),
+     ou25:MercadoOverUnder25.analisar(resultados,atual),
+     ou35:MercadoOverUnder35.analisar(resultados,atual),
+     over35:MercadoOver35.analisar(resultados,atual)
+   };
+   const proximoTemporal = opcoes?.proximoTemporal || ((typeof RelogioPartidas!=='undefined') ? RelogioPartidas.proximaPartida() : null);
+   if(typeof AnaliseTemporal!=='undefined') AnaliseTemporal.anexar(resultados,mercados,proximoTemporal);
+   // O histórico inteiro continua sendo usado pelos motores para estudo.
+   // A trava afeta somente a liberação do PALPITE na interface: antes de 3
+   // resultados novos, nenhum mercado deve chamar entrada.
+   if(opcoes && opcoes.liberarPalpite===false){
+     for(const m of Object.values(mercados)){
+       if(!m || !m.palpite) continue;
+       m.palpite=null;
+       m.ativo=false;
+     }
+   }
+   return {mercados};
+ },
+ valor(m){return m?.palpite?.valor??null},
+ percentual(m){return m?.palpite?.percentual??0},
+ texto(m,adaptador){return m?.palpite?adaptador.rotulo(m.palpite.valor):'⏳ Aguardando atualizações'}
+};
+"use strict";
+
+const GreenRed = {
+  _cache: { assinatura: null, avaliacoes: new Map() },
+
+  _valorReal(k, alvo) {
+    if (!alvo) return null;
+    if (k === "exato") return alvo.placar || null;
+    if (k === "gols") return String(Math.min(5, Number(alvo.totalGols)));
+    if (k === "r12") return alvo.golsCasa > alvo.golsFora ? "1" : (alvo.golsCasa === alvo.golsFora ? "X" : "2");
+    if (k === "bm") return alvo.golsCasa > 0 && alvo.golsFora > 0 ? "SIM" : "NÃO";
+    const linha = ({ou05:0.5, under05:0.5, ou15:1.5, ou25:2.5, ou35:3.5, over35:3.5})[k];
+    if (linha == null) return null;
+    return Number(alvo.totalGols) > linha ? "MAIS" : "MENOS";
+  },
+
+  _rotularAvaliacao(alvo) {
+    const chaves = ["exato","gols","r12","bm","ou05","under05","ou15","ou25","ou35","over35"];
+    return Object.fromEntries(chaves.map(k => [k, this._valorReal(k, alvo)]));
+  },
+
+  _assinatura(r) {
+    return r.map(x => `${x.id || ""}:${x.placar || ""}`).join("|");
+  },
+
+  _prepararCache(r) {
+    const assinatura = this._assinatura(r);
+
+    if (this._cache.assinatura !== assinatura) {
+      const anteriorAssinatura = this._cache.assinatura || "";
+
+      const somenteAppend =
+        anteriorAssinatura &&
+        assinatura.startsWith(anteriorAssinatura) &&
+        (
+          assinatura.length === anteriorAssinatura.length ||
+          assinatura.charAt(anteriorAssinatura.length) === "|"
+        );
+
+      if (!somenteAppend) {
+        this._cache.avaliacoes.clear();
+      }
+
+      this._cache.assinatura = assinatura;
+    }
+  },
+
+  _inicioContagem(r) {
+    // O histórico/backup inteiro é somente BASE DE ESTUDO.
+    // Os indicadores GREEN/RED da sessão atual começam zerados.
+    // Os 3 primeiros resultados novos servem apenas para formar o contexto.
+    // A primeira previsão é feita para o 4º resultado novo; portanto,
+    // a primeira avaliação possível é o índice base + 3.
+    const base = Number(Historico?.obterQuantidadeBaseEstudo?.() ?? 0);
+    if (!Number.isFinite(base) || base < 0) return 1;
+    return Math.min(r.length, base + 3);
+  },
+
+  avaliarPalpiteRegistrado(alvo, registro) {
+    if (!alvo || !registro?.palpites) return null;
+    const p = registro.palpites;
+    const res = { previsoes: {}, valoresPrevistos: {}, reais: this._rotularAvaliacao(alvo) };
+    const ativo = k => p[k] && p[k].valor != null;
+
+    if (ativo("exato")) {
+      res.exato = p.exato.valor === alvo.placar;
+      res.previsoes.exato = p.exato.valor;
+      res.valoresPrevistos.exato = p.exato.valor;
+    }
+    if (ativo("gols")) {
+      const previsto = Number(p.gols.valor);
+      res.gols = previsto === 5 ? alvo.totalGols >= 5 : previsto === alvo.totalGols;
+      res.previsoes.gols = p.gols.valor;
+      res.valoresPrevistos.gols = String(p.gols.valor);
+    }
+    if (ativo("r12")) {
+      const v = p.r12.valor;
+      res.r12 = (v === "1" && alvo.golsCasa > alvo.golsFora) ||
+        (v === "X" && alvo.golsCasa === alvo.golsFora) ||
+        (v === "2" && alvo.golsCasa < alvo.golsFora);
+      res.previsoes.r12 = typeof MercadoResultado1X2 !== "undefined" ? MercadoResultado1X2.rotulo(v) : v;
+      res.valoresPrevistos.r12 = v;
+    }
+    if (ativo("bm")) {
+      const v = p.bm.valor === "SIM";
+      res.bm = v === (alvo.golsCasa > 0 && alvo.golsFora > 0);
+      res.previsoes.bm = p.bm.valor;
+      res.valoresPrevistos.bm = p.bm.valor;
+    }
+    for (const [k, linha] of [["ou05",0.5],["under05",0.5],["ou15",1.5],["ou25",2.5],["ou35",3.5],["over35",3.5]]) {
+      if (!ativo(k)) continue;
+      const v = p[k].valor;
+      res[k] = v === "MAIS" ? alvo.totalGols > linha : alvo.totalGols < linha;
+      res.previsoes[k] = v === "MAIS" ? `Mais de ${linha}` : `Menos de ${linha}`;
+      res.valoresPrevistos[k] = v;
+    }
+    return res;
+  },
+
+  avaliarPrevisao(resultados, indice) {
+    if (!Array.isArray(resultados) || indice <= 0 || indice >= resultados.length) {
+      return null;
+    }
+
+    const alvo = resultados[indice];
+    const m = Previsoes.gerar(resultados.slice(0, indice), null, {proximoTemporal: resultados[indice]?._temporal || null}).mercados;
+    const ativo = k => m[k]?.ativo && m[k]?.palpite;
+    const res = { previsoes: {}, valoresPrevistos: {}, reais: this._rotularAvaliacao(alvo) };
+
+    if (ativo("exato")) {
+      res.exato = m.exato.palpite.valor === alvo.placar;
+      res.previsoes.exato = m.exato.palpite.valor;
+      res.valoresPrevistos.exato = m.exato.palpite.valor;
+    }
+
+    if (ativo("gols")) {
+      const previstoGols = Number(m.gols.palpite.valor);
+      res.gols = previstoGols === 5 ? alvo.totalGols >= 5 : previstoGols === alvo.totalGols;
+      res.previsoes.gols = m.gols.palpite.valor;
+      res.valoresPrevistos.gols = String(m.gols.palpite.valor);
+    }
+
+    if (ativo("r12")) {
+      const v = m.r12.palpite.valor;
+      res.r12 = (v === "1" && alvo.golsCasa > alvo.golsFora) ||
+        (v === "X" && alvo.golsCasa === alvo.golsFora) ||
+        (v === "2" && alvo.golsCasa < alvo.golsFora);
+      res.previsoes.r12 = MercadoResultado1X2.rotulo(v);
+      res.valoresPrevistos.r12 = v;
+    }
+
+    if (ativo("bm")) {
+      const v = m.bm.palpite.valor === "SIM";
+      res.bm = v === (alvo.golsCasa > 0 && alvo.golsFora > 0);
+      res.previsoes.bm = m.bm.palpite.valor;
+      res.valoresPrevistos.bm = m.bm.palpite.valor;
+    }
+
+    for (const [k, linha] of [["ou05",0.5],["under05",0.5],["ou15",1.5],["ou25",2.5],["ou35",3.5],["over35",3.5]]) {
+      if (!ativo(k)) continue;
+      const v = m[k].palpite.valor;
+      res[k] = v === "MAIS" ? alvo.totalGols > linha : alvo.totalGols < linha;
+      res.previsoes[k] = v === "MAIS" ? `Mais de ${linha}` : `Menos de ${linha}`;
+      res.valoresPrevistos[k] = v;
+    }
+
+    return res;
+  },
+
+  _avaliacaoCache(r, indice) {
+    this._prepararCache(r);
+
+    if (!this._cache.avaliacoes.has(indice)) {
+      this._cache.avaliacoes.set(indice, this.avaliarPrevisao(r, indice));
+    }
+
+    return this._cache.avaliacoes.get(indice);
+  },
+
+  resumo(r) {
+    const chaves = [
+      "exato", "ou05", "under05", "ou15", "ou25",
+      "ou35", "over35", "bm", "r12", "gols"
+    ];
+
+    const vazio = () => ({
+      atual: 0,
+      tipo: null,
+      greens: 0,
+      reds: 0,
+      totalGreens: 0,
+      totalReds: 0,
+      historico: []
+    });
+
+    if (!Array.isArray(r) || r.length < 2) {
+      this._prepararCache(Array.isArray(r) ? r : []);
+      return {
+        anterior: null,
+        sequencias: Object.fromEntries(chaves.map(k => [k, vazio()]))
+      };
+    }
+
+    this._prepararCache(r);
+
+    const historicos = Object.fromEntries(chaves.map(k => [k, []]));
+    // Desempenho individual por resultado. Isso evita mascarar um mercado
+    // forte em um lado e fraco no outro (ex.: Under bom, Over quase nunca chamado).
+    const individuais = Object.fromEntries(chaves.map(k => [k, {}]));
+    const garantir = (k, valor) => {
+      if (valor == null) return null;
+      const chave = String(valor);
+      if (!individuais[k][chave]) individuais[k][chave] = {
+        valor: chave, ocorrencias: 0, chamadas: 0, greens: 0, reds: 0, historico: []
+      };
+      return individuais[k][chave];
+    };
+    const categoriasFixas = {
+      gols:["0","1","2","3","4","5"],
+      r12:["1","X","2"],
+      bm:["SIM","NÃO"],
+      ou05:["MAIS","MENOS"], under05:["MAIS","MENOS"],
+      ou15:["MAIS","MENOS"], ou25:["MAIS","MENOS"],
+      ou35:["MENOS","MAIS"], over35:["MAIS","MENOS"]
+    };
+    for (const [k, valores] of Object.entries(categoriasFixas)) {
+      for (const valor of valores) garantir(k, valor);
+    }
+    const inicio = this._inicioContagem(r);
+    let anterior = null;
+
+    for (let i = inicio; i < r.length; i++) {
+      if (i <= 0) continue;
+
+      let avaliacao = null;
+      const alvo = r[i];
+      const registrado = (typeof PalpitesRegistrados !== "undefined" && alvo?._temporal)
+        ? PalpitesRegistrados.obterParaPartida(alvo._temporal)
+        : null;
+      avaliacao = registrado
+        ? this.avaliarPalpiteRegistrado(alvo, registrado)
+        : this._avaliacaoCache(r, i);
+
+      if (i === r.length - 1) {
+        anterior = avaliacao;
+      }
+
+      if (!avaliacao) continue;
+
+      // Denominador da captura: quantas vezes cada resultado realmente ocorreu,
+      // mesmo quando o mercado decidiu aguardar e não chamar.
+      for (const k of chaves) {
+        const real = avaliacao.reais?.[k] ?? this._valorReal(k, alvo);
+        const itemReal = garantir(k, real);
+        if (itemReal) itemReal.ocorrencias++;
+      }
+
+      for (const k of chaves) {
+        if (typeof avaliacao[k] === "boolean") {
+          const status = avaliacao[k] ? "GREEN" : "RED";
+          historicos[k].push(status);
+          const previsto = avaliacao.valoresPrevistos?.[k];
+          const item = garantir(k, previsto);
+          if (item) {
+            item.chamadas++;
+            item.historico.push(status);
+            if (status === "GREEN") item.greens++; else item.reds++;
+          }
+        }
+      }
+    }
+
+    if (r.length <= inicio) {
+      anterior = null;
+    }
+
+    const sequencias = {};
+
+    for (const k of chaves) {
+      const h = historicos[k];
+      const tipo = h.at(-1) || null;
+
+      let atual = 0;
+      for (let i = h.length - 1; i >= 0 && h[i] === tipo; i--) {
+        atual++;
+      }
+
+      const totalGreens = h.filter(x => x === "GREEN").length;
+      const totalReds = h.filter(x => x === "RED").length;
+
+      sequencias[k] = {
+        atual,
+        tipo,
+        greens: tipo === "GREEN" ? atual : 0,
+        reds: tipo === "RED" ? atual : 0,
+        totalGreens,
+        totalReds,
+        historico: h
+      };
+
+      const porResultado = {};
+      const totalAvaliado = Object.values(individuais[k] || {}).reduce((soma,item)=>soma+(item.ocorrencias||0),0);
+      for (const [valor, item] of Object.entries(individuais[k] || {})) {
+        const chamadas = item.chamadas || 0;
+        const ocorrencias = item.ocorrencias || 0;
+        porResultado[valor] = {
+          ...item,
+          taxaChamada: totalAvaliado ? chamadas * 100 / totalAvaliado : 0,
+          acerto: chamadas ? item.greens * 100 / chamadas : 0,
+          captura: ocorrencias ? item.greens * 100 / ocorrencias : 0
+        };
+      }
+      sequencias[k].porResultado = porResultado;
+
+      // Compatibilidade com a tela antiga do especialista U0.5.
+      if (k === "under05") {
+        sequencias[k].porLado = {
+          MAIS: porResultado.MAIS || {greens:0,reds:0,chamadas:0,ocorrencias:0,acerto:0,captura:0,historico:[]},
+          MENOS: porResultado.MENOS || {greens:0,reds:0,chamadas:0,ocorrencias:0,acerto:0,captura:0,historico:[]}
+        };
+      }
+    }
+
+
+    return { anterior, sequencias, inicioContagem: inicio };
+  },
+
+  anterior(r) {
+    return this.resumo(r).anterior;
+  },
+
+  obterSequenciaMercado(r, k) {
+    return this.resumo(r).sequencias[k] || {
+      atual: 0, tipo: null, greens: 0, reds: 0, historico: []
+    };
+  },
+
+  obterSequenciasMercados(r) {
+    return this.resumo(r).sequencias;
+  },
+
+  obterSequencia(r) {
+    const s = this.obterSequenciaMercado(r, "exato");
+    return {
+      atual: s.atual,
+      tipo: s.tipo,
+      greensConsecutivos: s.greens,
+      redsConsecutivos: s.reds,
+      historico: s.historico
+    };
+  }
+};
+"use strict";
+
+/*
+ * MEMORIA PERMANENTE DOS MERCADOS
+ *
+ * O treinamento antigo ja chega consolidado em memoria-consolidada.js.
+ * A abertura apenas le as contagens prontas. Cada resultado novo acrescenta
+ * uma experiencia e salva a memoria, sem reconstruir 180 partidas.
+ */
+const Aprendizado = {
+  VERSAO: "2026-09-10-MERCADOS-INDIVIDUAIS-V1",
+  CHAVE_STORAGE: "esportes_virtuais_memoria_mercados_individuais_v1",
+  _resumo: {},
+  _processados: new Set(),
+  _iniciado: false,
+  _aprendendo: false,
+
+  _idIndividual(k, valor) {
+    const mercado = String(k || "").trim();
+    const lado = String(valor ?? "").trim();
+    return `${mercado}:${lado}`;
+  },
+
+  _clonarResumo(valor) {
+    const saida = {};
+    for (const [chave, bruto] of Object.entries(valor || {})) {
+      const primeiro = String(chave || "").split("|")[0] || "";
+      const partes = primeiro.split(":");
+      const k = String(bruto?.k || partes.shift() || "");
+      const ladoChave = partes.join(":");
+      const item = {
+        k,
+        valor: String(bruto?.valor ?? ladoChave ?? ""),
+        idIndividual: String(bruto?.idIndividual || this._idIndividual(k, bruto?.valor ?? ladoChave ?? "")),
+        amostra: Math.max(0, Number(bruto?.amostra) || 0),
+        acertos: Math.max(0, Number(bruto?.acertos) || 0),
+        erros: Math.max(0, Number(bruto?.erros) || 0)
+      };
+      item.amostra = Math.max(item.amostra, item.acertos + item.erros);
+      saida[chave] = item;
+    }
+    return saida;
+  },
+
+  iniciar(semente = {}) {
+    if (this._iniciado) return true;
+    this._resumo = this._clonarResumo(semente);
+    try {
+      const salvo = JSON.parse(localStorage.getItem(this.CHAVE_STORAGE) || "null");
+      if (salvo?.versao === this.VERSAO) this.importar(salvo, false);
+    } catch (e) {
+      console.warn("Memoria local dos mercados indisponivel:", e);
+    }
+    this._iniciado = true;
+    this._salvarLocal();
+    return true;
+  },
+
+  importar(pacote, salvar = true) {
+    if (!pacote || pacote.versao !== this.VERSAO) return false;
+    const recebido = this._clonarResumo(pacote.resumo);
+    for (const [chave, item] of Object.entries(recebido)) {
+      const atual = this._resumo[chave];
+      // A memoria remota e um retrato completo. Usar a maior amostra evita
+      // somar o mesmo aprendizado duas vezes entre dispositivos.
+      if (!atual || item.amostra > atual.amostra) this._resumo[chave] = item;
+    }
+    for (const chave of (pacote.processados || []).slice(-500)) {
+      if (chave) this._processados.add(String(chave));
+    }
+    if (salvar) this._salvarLocal();
+    return true;
+  },
+
+  exportar() {
+    return {
+      versao: this.VERSAO,
+      atualizadoEm: new Date().toISOString(),
+      resumo: this._clonarResumo(this._resumo),
+      processados: [...this._processados].slice(-500)
+    };
+  },
+
+  estatisticaMercado(k, valor = null) {
+    let amostra = 0, acertos = 0, erros = 0;
+    const filtrarLado = valor !== null && valor !== undefined && String(valor) !== "";
+    for (const item of Object.values(this._resumo || {})) {
+      if (String(item?.k || "") !== String(k || "")) continue;
+      if (filtrarLado && String(item?.valor ?? "") !== String(valor)) continue;
+      amostra += Math.max(0, Number(item?.amostra) || 0);
+      acertos += Math.max(0, Number(item?.acertos) || 0);
+      erros += Math.max(0, Number(item?.erros) || 0);
+    }
+    const taxa = amostra ? acertos / amostra * 100 : 0;
+    // Beta(3,3): evita que 2/2 tenha mais peso que uma amostra grande.
+    const taxaAjustada = amostra ? ((acertos + 3) / (amostra + 6)) * 100 : 50;
+    return {
+      k, valor: filtrarLado ? String(valor) : null,
+      idIndividual: filtrarLado ? this._idIndividual(k, valor) : String(k || ""),
+      amostra, acertos, erros, taxa, taxaAjustada
+    };
+  },
+
+  estatisticaIndividual(k, valor) {
+    return this.estatisticaMercado(k, valor);
+  },
+
+  rankingIndividuais(minAmostra = 3) {
+    const mapa = new Map();
+    for (const item of Object.values(this._resumo || {})) {
+      if (!item?.k || item?.valor === undefined || item?.valor === null || String(item.valor) === "") continue;
+      mapa.set(this._idIndividual(item.k, item.valor), [item.k, item.valor]);
+    }
+    return [...mapa.values()]
+      .map(([k, valor]) => this.estatisticaMercado(k, valor))
+      .filter(x => x.amostra >= Math.max(0, Number(minAmostra) || 0))
+      .sort((a,b) => b.taxaAjustada-a.taxaAjustada || b.amostra-a.amostra || b.taxa-a.taxa);
+  },
+
+  rankingMercados(minAmostra = 3) {
+    // Mantido por compatibilidade. Para as sugestões novas, use rankingIndividuais().
+    const chaves = ["exato","gols","r12","bm","ou05","under05","ou15","ou25","ou35","over35"];
+    return chaves.map(k => this.estatisticaMercado(k))
+      .filter(x => x.amostra >= Math.max(0, Number(minAmostra) || 0))
+      .sort((a,b) => b.taxaAjustada-a.taxaAjustada || b.amostra-a.amostra || b.taxa-a.taxa);
+  },
+
+  _salvarLocal() {
+    try {
+      localStorage.setItem(this.CHAVE_STORAGE, JSON.stringify(this.exportar()));
+      return true;
+    } catch (e) {
+      console.warn("Nao foi possivel guardar a memoria dos mercados:", e);
+      return false;
+    }
+  },
+
+  _faixaPct(p) {
+    const base = Math.floor((Number(p) || 0) / 10) * 10;
+    return `${base}-${base + 9}`;
+  },
+  _faixaOc(n) {
+    n = Number(n) || 0;
+    return n <= 1 ? "1" : n <= 3 ? "2-3" : n <= 7 ? "4-7" : n <= 15 ? "8-15" : "16+";
+  },
+  _faixaTam(n) {
+    n = Number(n) || 0;
+    return n <= 1 ? "1" : n <= 3 ? "2-3" : n <= 6 ? "4-6" : "7+";
+  },
+  _chave(k, m) {
+    // O lado faz parte da identidade da memória. MAIS 1.5 e MENOS 1.5
+    // usam os mesmos dados-base, mas nunca compartilham taxa de acerto.
+    return [
+      this._idIndividual(k, m?.palpite?.valor),
+      this._faixaPct(m?.palpite?.percentual),
+      this._faixaOc(m?.padrao?.ocorrencias?.length),
+      this._faixaTam(m?.padrao?.tamanho)
+    ].join("|");
+  },
+
+  avaliar(resultados, k, mercado) {
+    if (!this._iniciado) {
+      this.iniciar(typeof MemoriaConsolidada !== "undefined" ? MemoriaConsolidada.aprendizadoInicial : {});
+    }
+    if (!mercado?.ativo || !mercado?.palpite) return { disponivel: false };
+    const chave = this._chave(k, mercado);
+    const item = this._resumo[chave];
+    if (!item?.amostra) return { disponivel: false, amostra: 0, acertos: 0, erros: 0, taxa: 0, chave };
+    return {
+      disponivel: true,
+      amostra: item.amostra,
+      acertos: item.acertos,
+      erros: item.erros,
+      taxa: item.amostra ? item.acertos / item.amostra * 100 : 0,
+      chave
+    };
+  },
+
+  resumo(resultados, k, mercado) {
+    const a = this.avaliar(resultados, k, mercado);
+    if (!a.disponivel || a.amostra < 5) {
+      const n = a?.amostra || 0;
+      return {
+        a,
+        texto: `🧠 Memoria permanente ativa${n ? ` · ${n} caso(s) semelhante(s)` : ""}`,
+        classe: "muted",
+        sugestao: "⚪ SUGESTÃO: Dados insuficientes — aguarde mais informações",
+        classeSugestao: "muted"
+      };
+    }
+    const classe = a.taxa >= 65 ? "green" : a.taxa >= 50 ? "blue" : "red";
+    let sugestao, classeSugestao;
+    if (a.taxa >= 70) {
+      sugestao = "🟢 SUGESTÃO: Boa oportunidade";
+      classeSugestao = "green";
+    } else if (a.taxa >= 55) {
+      sugestao = "🟡 SUGESTÃO: Entrar com cautela";
+      classeSugestao = "blue";
+    } else {
+      sugestao = "🔴 SUGESTÃO: Não entrar nessa";
+      classeSugestao = "red";
+    }
+    return {
+      a,
+      texto: `🧠 Memoria permanente: ${a.taxa.toFixed(1)}% em ${a.amostra} situação(ões) · ${a.acertos} GREEN / ${a.erros} RED`,
+      classe,
+      sugestao,
+      classeSugestao
+    };
+  },
+
+  _chaveResultado(resultado) {
+    const t = resultado?._temporal;
+    if (t?.data && t?.horario) return `${t.data}|${t.horario}`;
+    return null;
+  },
+
+  aprenderIndice(resultados, indice, opcoes = null) {
+    if (!Array.isArray(resultados) || indice <= 0 || indice >= resultados.length) return false;
+    const alvo = resultados[indice];
+    if (!alvo?.mandante || !alvo?.visitante || !alvo?._temporal?.data || !alvo?._temporal?.horario) return false;
+    const resumoDestino = opcoes?.resumo || this._resumo;
+    const processadosDestino = opcoes?.processados || this._processados;
+    const persistir = opcoes?.persistir !== false;
+    const chaveResultado = this._chaveResultado(alvo);
+    if (!chaveResultado || processadosDestino.has(chaveResultado)) return false;
+
+    const anteriores = resultados.slice(0, indice);
+    const mercados = Previsoes.gerar(
+      anteriores,
+      null,
+      { proximoTemporal: alvo?._temporal || null }
+    ).mercados;
+    const avaliacao = GreenRed.avaliarPrevisao(resultados, indice);
+    const chaves = ["exato", "gols", "r12", "bm", "ou05", "under05", "ou15", "ou25", "ou35", "over35"];
+    for (const k of chaves) {
+      const mercado = mercados[k];
+      if (!mercado?.ativo || !mercado?.palpite || typeof avaliacao?.[k] !== "boolean") continue;
+      const chave = this._chave(k, mercado);
+      const valor = String(mercado.palpite.valor ?? "");
+      const item = resumoDestino[chave] || (resumoDestino[chave] = {
+        k,
+        valor,
+        idIndividual: this._idIndividual(k, valor),
+        amostra: 0,
+        acertos: 0,
+        erros: 0
+      });
+      item.amostra++;
+      if (avaliacao[k]) item.acertos++;
+      else item.erros++;
+    }
+
+    processadosDestino.add(chaveResultado);
+    if (persistir) {
+      this._salvarLocal();
+      if (typeof Sincronizacao !== "undefined" && Sincronizacao.publicarMemoriaAprendizado) {
+        Sincronizacao.publicarMemoriaAprendizado(this.exportar());
+      }
+    }
+    return true;
+  },
+
+  aprenderPendentes(resultados, aoConcluir = null) {
+    if (this._aprendendo || !Array.isArray(resultados)) return false;
+    const indices = [];
+    for (let i = 1; i < resultados.length; i++) {
+      const chave = this._chaveResultado(resultados[i]);
+      if (chave && !this._processados.has(chave)) indices.push(i);
+    }
+    if (!indices.length) {
+      if (typeof aoConcluir === "function") { try { aoConcluir(); } catch (_) {} }
+      return false;
+    }
+
+    // Aprende em uma cópia invisível. A interface continua vendo somente a
+    // última memória COMPLETA; assim "chamadas" não sobe 0,1,2... na tela.
+    // Ao terminar, troca tudo de uma vez e publica somente um pacote no Firebase.
+    this._aprendendo = true;
+    const resumoTrabalho = this._clonarResumo(this._resumo);
+    const processadosTrabalho = new Set(this._processados);
+    let pos = 0;
+    const LOTE = 24;
+
+    const concluir = () => {
+      this._resumo = resumoTrabalho;
+      this._processados = processadosTrabalho;
+      this._aprendendo = false;
+      this._salvarLocal();
+      if (typeof Sincronizacao !== "undefined" && Sincronizacao.publicarMemoriaAprendizado) {
+        Sincronizacao.publicarMemoriaAprendizado(this.exportar());
+      }
+      if (typeof aoConcluir === "function") { try { aoConcluir(); } catch (_) {} }
+    };
+
+    const proximo = () => {
+      const fim = Math.min(indices.length, pos + LOTE);
+      try {
+        for (; pos < fim; pos++) {
+          this.aprenderIndice(resultados, indices[pos], {
+            resumo: resumoTrabalho,
+            processados: processadosTrabalho,
+            persistir: false
+          });
+        }
+      } catch (e) {
+        console.warn("Falha ao aprender lote de resultados:", e);
+      }
+      if (pos < indices.length) setTimeout(proximo, 0);
+      else concluir();
+    };
+
+    setTimeout(proximo, 0);
+    return true;
+  }
+};
+"use strict";
+
+/*
+ * CONSULTOR DE ENTRADAS — módulo isolado.
+ *
+ * Ele SOMENTE lê o histórico e as previsões já geradas pelo aplicativo.
+ * Não altera especialistas, padrões, GREEN/RED, aprendizado ou histórico.
+ *
+ * Estratégia:
+ * - sem 1X2 e sem O/U 0.5;
+ * - 2 entradas principais de R$ 1,00 pelos melhores valores estimados (EV);
+ * - cada candidato precisa de pelo menos 40 casos históricos comparáveis;
+ * - 3ª entrada de R$ 0,50, com preferência por Under 3.5;
+ * - qualquer RED da recomendação => pula o jogo seguinte;
+ * - odds abaixo são as referências usadas nos testes e ficam isoladas aqui.
+ */
+const ConsultorEntradas = {
+  CHAVE_ESTADO: "esportes_virtuais_consultor_entradas_base_zerada_v1",
+  EV_MINIMO: 0.08,
+  MIN_AMOSTRA: 40,
+  MIN_AMOSTRA_STREAK: 8,
+  INICIO_MODELO: 100,
+  CHAVE_MODELO: "esportes_virtuais_consultor_modelo_base_zerada_v1",
+  MERCADOS_MODELO: ["bm", "ou15", "ou25", "over35"],
+
+  ODDS: {
+    bm: { "SIM": 2.30, "NÃO": 1.60 },
+    ou15: { "MAIS": 1.55, "MENOS": 2.45 },
+    ou25: { "MAIS": 2.80, "MENOS": 1.44 },
+    ou35: { "MENOS": 1.12 },
+    over35: { "MAIS": 6.00 }
+  },
+
+  NOMES: {
+    bm: "Ambos Marcam",
+    ou15: "Over / Under 1.5",
+    ou25: "Over / Under 2.5",
+    ou35: "Under 3.5",
+    over35: "Over 3.5"
+  },
+
+  _modelo: {
+    pronto: false,
+    processando: false,
+    qtd: 0,
+    ultimoPlacar: null,
+    base: new Map(),
+    porStreak: new Map(),
+    streakGreen: {}
+  },
+
+  _estadoPadrao() {
+    return { recomendacao: null, pularAlvoQtd: null, ultimaAvaliacao: null };
+  },
+
+  _carregarEstado() {
+    try {
+      const bruto = localStorage.getItem(this.CHAVE_ESTADO);
+      if (!bruto) return this._estadoPadrao();
+      return { ...this._estadoPadrao(), ...(JSON.parse(bruto) || {}) };
+    } catch (_) { return this._estadoPadrao(); }
+  },
+
+  _salvarEstado(estado) {
+    try { localStorage.setItem(this.CHAVE_ESTADO, JSON.stringify(estado)); } catch (_) {}
+  },
+
+  _valorReal(k, alvo) {
+    if (!alvo) return null;
+    if (k === "bm") return alvo.golsCasa > 0 && alvo.golsFora > 0 ? "SIM" : "NÃO";
+    if (k === "ou15") return Number(alvo.totalGols) > 1.5 ? "MAIS" : "MENOS";
+    if (k === "ou25") return Number(alvo.totalGols) > 2.5 ? "MAIS" : "MENOS";
+    if (k === "ou35") return Number(alvo.totalGols) < 3.5 ? "MENOS" : "MAIS";
+    if (k === "over35") return Number(alvo.totalGols) > 3.5 ? "MAIS" : "MENOS";
+    return null;
+  },
+
+  _avaliarPick(pick, alvo) {
+    return !!pick && !!alvo && this._valorReal(pick.k, alvo) === String(pick.valor);
+  },
+
+  _processarRecomendacaoAnterior(resultados, estado) {
+    const rec = estado.recomendacao;
+    if (!rec?.picks?.length) return estado;
+    const qtd = resultados.length;
+    if (qtd < Number(rec.alvoQtd)) return estado;
+
+    // Se houve importação e o histórico pulou mais de uma posição, não associa
+    // o sinal a um placar arbitrário.
+    if (qtd !== Number(rec.alvoQtd)) {
+      estado.recomendacao = null;
+      this._salvarEstado(estado);
+      return estado;
+    }
+
+    const alvo = resultados.at(-1);
+    const detalhes = rec.picks.map(pick => ({ ...pick, green: this._avaliarPick(pick, alvo) }));
+    const teveRed = detalhes.some(x => x.green === false);
+    estado.ultimaAvaliacao = { placar: alvo?.placar || "-", detalhes, teveRed, qtd };
+    estado.recomendacao = null;
+    if (teveRed) estado.pularAlvoQtd = qtd + 1;
+    this._salvarEstado(estado);
+    return estado;
+  },
+
+  _novoModelo() {
+    this._modelo = {
+      pronto: false,
+      processando: false,
+      qtd: 0,
+      ultimoPlacar: null,
+      base: new Map(),
+      porStreak: new Map(),
+      streakGreen: Object.fromEntries(this.MERCADOS_MODELO.map(k => [k, 0]))
+    };
+  },
+
+  _salvarModeloCache() {
+    if (!this._modelo.pronto) return;
+    try {
+      localStorage.setItem(this.CHAVE_MODELO, JSON.stringify({
+        qtd: this._modelo.qtd,
+        ultimoPlacar: this._modelo.ultimoPlacar,
+        base: Array.from(this._modelo.base.entries()),
+        porStreak: Array.from(this._modelo.porStreak.entries()),
+        streakGreen: this._modelo.streakGreen
+      }));
+    } catch (_) {}
+  },
+
+  _restaurarModeloCache(resultados) {
+    try {
+      const bruto = localStorage.getItem(this.CHAVE_MODELO);
+      if (!bruto) return false;
+      const c = JSON.parse(bruto);
+      const qtdAtual = resultados.length;
+      const exato = Number(c.qtd) === qtdAtual && c.ultimoPlacar === (resultados.at(-1)?.placar || null);
+      const appendUm = Number(c.qtd) + 1 === qtdAtual && c.ultimoPlacar === (resultados.at(-2)?.placar || null);
+      if (!exato && !appendUm) return false;
+      this._modelo = {
+        pronto: true, processando: false, qtd: Number(c.qtd) || 0,
+        ultimoPlacar: c.ultimoPlacar || null,
+        base: new Map(Array.isArray(c.base) ? c.base : []),
+        porStreak: new Map(Array.isArray(c.porStreak) ? c.porStreak : []),
+        streakGreen: {
+          ...Object.fromEntries(this.MERCADOS_MODELO.map(k => [k, 0])),
+          ...(c.streakGreen || {})
+        }
+      };
+      if (appendUm) {
+        const av = GreenRed.avaliarPrevisao(resultados, qtdAtual - 1);
+        this._absorverAvaliacao(av);
+        this._modelo.qtd = qtdAtual;
+        this._modelo.ultimoPlacar = resultados.at(-1)?.placar || null;
+        this._salvarModeloCache();
+      }
+      return true;
+    } catch (_) { return false; }
+  },
+
+  _somar(map, chave, green) {
+    const atual = map.get(chave) || { n: 0, wins: 0 };
+    atual.n++;
+    if (green) atual.wins++;
+    map.set(chave, atual);
+  },
+
+  _absorverAvaliacao(avaliacao) {
+    if (!avaliacao) return;
+    for (const k of this.MERCADOS_MODELO) {
+      if (typeof avaliacao[k] !== "boolean") continue;
+      const valor = avaliacao.valoresPrevistos?.[k];
+      if (valor == null) continue;
+      const green = Boolean(avaliacao[k]);
+      const streakAntes = Math.min(4, Number(this._modelo.streakGreen[k]) || 0);
+      const baseKey = `${k}|${String(valor)}`;
+      const streakKey = `${baseKey}|${streakAntes}`;
+      this._somar(this._modelo.base, baseKey, green);
+      this._somar(this._modelo.porStreak, streakKey, green);
+      this._modelo.streakGreen[k] = green ? streakAntes + 1 : 0;
+    }
+  },
+
+  _finalizarModelo(resultados) {
+    this._modelo.pronto = true;
+    this._modelo.processando = false;
+    this._modelo.qtd = resultados.length;
+    this._modelo.ultimoPlacar = resultados.at(-1)?.placar || null;
+    this._salvarModeloCache();
+    if (typeof Interface !== "undefined" && Interface.atualizar) {
+      setTimeout(() => Interface.atualizar(), 0);
+    }
+  },
+
+  _construirModeloAssincrono(resultados) {
+    this._novoModelo();
+    this._modelo.processando = true;
+    const fim = resultados.length;
+    const inicio = fim > this.INICIO_MODELO ? this.INICIO_MODELO : 1;
+    let i = inicio;
+
+    const passo = () => {
+      const limite = Math.min(fim, i + 8);
+      try {
+        for (; i < limite; i++) {
+          const av = (typeof GreenRed !== "undefined" && GreenRed.avaliarPrevisao)
+            ? GreenRed.avaliarPrevisao(resultados, i)
+            : null;
+          this._absorverAvaliacao(av);
+        }
+      } catch (e) {
+        console.error("Erro no modelo do Consultor de Entradas:", e);
+        this._modelo.processando = false;
+        return;
+      }
+      if (i < fim) setTimeout(passo, 0);
+      else this._finalizarModelo(resultados);
+    };
+    setTimeout(passo, 0);
+  },
+
+  _garantirModelo(resultados) {
+    const qtd = resultados.length;
+    const ultimo = resultados.at(-1)?.placar || null;
+
+    if (this._modelo.processando) return false;
+
+    if (!this._modelo.pronto) {
+      if (this._restaurarModeloCache(resultados)) return true;
+      this._construirModeloAssincrono(resultados);
+      return false;
+    }
+
+    if (this._modelo.qtd === qtd && this._modelo.ultimoPlacar === ultimo) return true;
+
+    // Caminho rápido: chegou exatamente um resultado novo. Atualiza o modelo
+    // sem reconstruir toda a janela histórica.
+    if (qtd === this._modelo.qtd + 1) {
+      try {
+        const av = GreenRed.avaliarPrevisao(resultados, qtd - 1);
+        this._absorverAvaliacao(av);
+        this._modelo.qtd = qtd;
+        this._modelo.ultimoPlacar = ultimo;
+        this._salvarModeloCache();
+        return true;
+      } catch (_) {
+        this._construirModeloAssincrono(resultados);
+        return false;
+      }
+    }
+
+    // Importação, restauração ou alteração antiga: reconstrói somente o modelo
+    // isolado, sem tocar no restante do aplicativo.
+    this._construirModeloAssincrono(resultados);
+    return false;
+  },
+
+  _estimativa(k, valor) {
+    const streak = Math.min(4, Number(this._modelo.streakGreen[k]) || 0);
+    const baseKey = `${k}|${String(valor)}`;
+    const streakKey = `${baseKey}|${streak}`;
+    const esp = this._modelo.porStreak.get(streakKey);
+    const base = this._modelo.base.get(baseKey);
+    const grupo = esp && esp.n >= this.MIN_AMOSTRA_STREAK ? esp : base;
+    if (!grupo || grupo.n < this.MIN_AMOSTRA) return null;
+    // Suavização Beta/Laplace usada nos testes para não supervalorizar amostras.
+    const p = (grupo.wins + 2) / (grupo.n + 4);
+    return { p, n: grupo.n, wins: grupo.wins, streak, usouStreak: grupo === esp };
+  },
+
+  _candidato(k, m) {
+    if (!m?.ativo || !m?.palpite) return null;
+    const valor = String(m.palpite.valor);
+    const odd = Number(this.ODDS?.[k]?.[valor]);
+    if (!Number.isFinite(odd) || odd <= 1) return null;
+    const est = this._estimativa(k, valor);
+    if (!est) return null;
+    const ev = est.p * odd - 1;
+    return {
+      k, valor, odd, prob: est.p * 100, ev,
+      amostra: est.n, wins: est.wins, streak: est.streak,
+      usouStreak: est.usouStreak, stake: 1.00
+    };
+  },
+
+  _recentesUnder35(resultados, n = 30) {
+    const lista = (resultados || []).slice(-n);
+    if (!lista.length) return { taxa: 0, corridaOver: 0, amostra: 0 };
+    const greens = lista.filter(x => Number(x.totalGols) < 3.5).length;
+    let corridaOver = 0;
+    for (let i = lista.length - 1; i >= 0; i--) {
+      if (Number(lista[i].totalGols) < 3.5) break;
+      corridaOver++;
+    }
+    return { taxa: greens * 100 / lista.length, corridaOver, amostra: lista.length };
+  },
+
+  _terceiraEntrada(resultados, principais, mercados) {
+    const under = this._recentesUnder35(resultados, 30);
+    const usarUnder = under.amostra >= 10 && under.taxa >= 75 && under.corridaOver < 2;
+
+    if (usarUnder) {
+      return {
+        k: "ou35", valor: "MENOS", odd: this.ODDS.ou35.MENOS,
+        prob: under.taxa,
+        ev: (under.taxa / 100) * this.ODDS.ou35.MENOS - 1,
+        amostra: under.amostra, stake: 0.50, terceira: true,
+        motivo: `Under 3.5 em ${under.taxa.toFixed(1)}% dos últimos ${under.amostra}`
+      };
+    }
+
+    const usados = new Set(principais.map(x => `${x.k}|${x.valor}`));
+    const alternativas = this.MERCADOS_MODELO
+      .map(k => this._candidato(k, mercados[k]))
+      .filter(Boolean)
+      .filter(x => !usados.has(`${x.k}|${x.valor}`) && x.ev >= this.EV_MINIMO)
+      .sort((a, b) => b.ev - a.ev || b.prob - a.prob);
+
+    if (alternativas.length) {
+      return {
+        ...alternativas[0], stake: 0.50, terceira: true,
+        motivo: "Under 3.5 sem confirmação forte; 3ª entrada foi para o próximo melhor valor"
+      };
+    }
+
+    return {
+      k: "ou35", valor: "MENOS", odd: this.ODDS.ou35.MENOS,
+      prob: under.taxa,
+      ev: (under.taxa / 100) * this.ODDS.ou35.MENOS - 1,
+      amostra: under.amostra, stake: 0.50, terceira: true,
+      motivo: "3ª entrada pequena em Under 3.5"
+    };
+  },
+
+  analisar(resultados, mercados, liberado = true) {
+    const estado = this._processarRecomendacaoAnterior(resultados, this._carregarEstado());
+    const qtd = resultados.length;
+
+    if (!liberado) {
+      return { status: "AGUARDAR", motivo: "Aguardando os 3 resultados iniciais da sessão.", picks: [], estado };
+    }
+
+    if (estado.pularAlvoQtd != null) {
+      if (qtd < Number(estado.pularAlvoQtd)) {
+        return { status: "PULAR", motivo: "Cooldown: houve RED na última recomendação.", picks: [], estado };
+      }
+      estado.pularAlvoQtd = null;
+      this._salvarEstado(estado);
+    }
+
+    if (estado.recomendacao && Number(estado.recomendacao.baseQtd) === qtd) {
+      return { status: "ENTRAR", motivo: estado.recomendacao.motivo, picks: estado.recomendacao.picks, estado };
+    }
+
+    if (!this._garantirModelo(resultados)) {
+      return {
+        status: "AGUARDAR",
+        motivo: `Preparando o modelo isolado com o histórico anterior (a partir do resultado ${this.INICIO_MODELO})…`,
+        picks: [], estado, preparando: true
+      };
+    }
+
+    const principais = this.MERCADOS_MODELO
+      .map(k => this._candidato(k, mercados[k]))
+      .filter(Boolean)
+      .filter(x => x.ev >= this.EV_MINIMO)
+      .sort((a, b) => b.ev - a.ev || b.prob - a.prob);
+
+    if (principais.length < 2) {
+      return {
+        status: "AGUARDAR",
+        motivo: `Só ${principais.length} mercado(s) passou/passaram no filtro de valor e amostra. Não força entrada.`,
+        picks: [], candidatos: principais, estado
+      };
+    }
+
+    const picks = [principais[0], principais[1]];
+    picks.push(this._terceiraEntrada(resultados, picks, mercados));
+
+    const rec = {
+      baseQtd: qtd,
+      alvoQtd: qtd + 1,
+      criadoEm: Date.now(),
+      motivo: "Dois melhores valores históricos + 3ª entrada pequena, preferindo Under 3.5.",
+      picks
+    };
+    estado.recomendacao = rec;
+    this._salvarEstado(estado);
+    return { status: "ENTRAR", motivo: rec.motivo, picks, estado };
+  },
+
+  _rotuloPick(pick) {
+    const nome = this.NOMES[pick.k] || pick.k;
+    let lado = pick.valor;
+    if (pick.k === "ou15") lado = pick.valor === "MAIS" ? "Mais de 1.5" : "Menos de 1.5";
+    if (pick.k === "ou25") lado = pick.valor === "MAIS" ? "Mais de 2.5" : "Menos de 2.5";
+    if (pick.k === "ou35") lado = "Menos de 3.5";
+    if (pick.k === "over35") lado = "Mais de 3.5";
+    return `${nome} — ${lado}`;
+  },
+
+  _htmlUltima(ultima) {
+    if (!ultima?.detalhes?.length) return "";
+    const itens = ultima.detalhes.map(x =>
+      `<span class="consultor-mini ${x.green ? "consultor-green" : "consultor-red"}">${x.green ? "🟢" : "🔴"} ${this._rotuloPick(x)}</span>`
+    ).join("");
+    return `<div class="consultor-ultima"><b>Última recomendação:</b> ${ultima.placar} · ${itens}</div>`;
+  },
+
+  atualizar({ resultados = [], mercados = {}, liberado = true } = {}) {
+    const el = document.getElementById("consultor-entradas");
+    if (!el) return;
+    const analise = this.analisar(resultados, mercados, liberado);
+    const ultima = analise.estado?.ultimaAvaliacao;
+    const horario = (typeof RelogioPartidas !== "undefined") ? RelogioPartidas.proximaPartida()?.horario : null;
+
+    if (analise.status === "PULAR") {
+      el.innerHTML = `<h2>🧭 Consultor de Entradas</h2>
+        <div class="consultor-status consultor-pular">⏸ <b>PULAR O PRÓXIMO JOGO${horario ? ` (${horario})` : ""}</b></div>
+        <p>${analise.motivo}</p>${this._htmlUltima(ultima)}
+        <p class="consultor-nota">Módulo isolado: nada aqui modifica os especialistas do aplicativo.</p>`;
+      return;
+    }
+
+    if (analise.status !== "ENTRAR") {
+      const candidatos = (analise.candidatos || []).map(x =>
+        `${this._rotuloPick(x)} · ${x.amostra} casos · EV ${(x.ev * 100).toFixed(1)}%`
+      ).join(" · ");
+      el.innerHTML = `<h2>🧭 Consultor de Entradas</h2>
+        <div class="consultor-status consultor-aguardar">⚪ <b>${analise.preparando ? "PREPARANDO" : "AGUARDAR"}${horario ? ` · próximo jogo ${horario}` : ""}</b></div>
+        <p>${analise.motivo}</p>${candidatos ? `<p class="consultor-candidatos">Passou no filtro: ${candidatos}</p>` : ""}
+        ${this._htmlUltima(ultima)}
+        <p class="consultor-nota">Módulo isolado: nada aqui modifica os especialistas do aplicativo.</p>`;
+      return;
+    }
+
+    const cards = analise.picks.map((x, i) => {
+      const ev = Number.isFinite(x.ev) ? `${x.ev >= 0 ? "+" : ""}${(x.ev * 100).toFixed(1)}%` : "—";
+      const amostra = x.amostra ? ` · amostra <b>${x.amostra}</b>` : "";
+      return `<div class="consultor-pick">
+        <div class="consultor-pick-topo"><b>Entrada ${i + 1}</b><strong>R$ ${Number(x.stake).toFixed(2).replace(".", ",")}</strong></div>
+        <div class="consultor-mercado">${this._rotuloPick(x)}</div>
+        <div class="consultor-detalhe">Odd ref. <b>${Number(x.odd).toFixed(2)}</b> · confiança est. <b>${Number(x.prob).toFixed(1)}%</b>${amostra} · EV <b>${ev}</b></div>
+        ${x.motivo ? `<div class="consultor-motivo">${x.motivo}</div>` : ""}
+      </div>`;
+    }).join("");
+
+    el.innerHTML = `<h2>🧭 Consultor de Entradas</h2>
+      <div class="consultor-status consultor-entrar">🟢 <b>ENTRAR${horario ? ` NO JOGO DAS ${horario}` : ""}</b></div>
+      <div class="consultor-grid">${cards}</div>
+      <p class="consultor-regra">Total sugerido: <b>R$ 2,50</b> · R$1 + R$1 + R$0,50 · se qualquer entrada der RED, o consultor pula o jogo seguinte.</p>
+      ${this._htmlUltima(ultima)}
+      <p class="consultor-nota">Odds de referência dos testes. Confira a odd real da casa antes de entrar. O consultor apenas recomenda; não altera o restante do app.</p>`;
+  }
+};
+"use strict";
+
+/*
+ * Registro persistente dos palpites por partida.
+ *
+ * Objetivo: se o aplicativo for fechado/reaberto durante uma partida,
+ * o último palpite disponível é associado ao horário da partida que estiver
+ * rolando no momento da abertura. Assim, o resultado digitado posteriormente
+ * pode avaliar exatamente aquele palpite, em vez de gerar um palpite novo e
+ * perder a referência da entrada anterior.
+ */
+const PalpitesRegistrados = {
+  CHAVE: "esportes_virtuais_palpites_registrados_base_zerada_v1",
+  CHAVE_ULTIMO: "esportes_virtuais_ultimo_palpite_base_zerada_v1",
+
+  _ler(chave) {
+    try { return JSON.parse(localStorage.getItem(chave)) || {}; }
+    catch (_) { return {}; }
+  },
+
+  _salvar(chave, valor) {
+    try { localStorage.setItem(chave, JSON.stringify(valor)); return true; }
+    catch (e) { console.error("Erro ao salvar palpites:", e); return false; }
+  },
+
+  limpar() {
+    localStorage.removeItem(this.CHAVE);
+    localStorage.removeItem(this.CHAVE_ULTIMO);
+  },
+
+  _extrair(mercados) {
+    const out = {};
+    for (const [k, m] of Object.entries(mercados || {})) {
+      if (!m?.palpite) continue;
+      out[k] = {
+        valor: m.palpite.valor,
+        percentual: Number(m.palpite.percentual) || 0,
+        quantidade: Number(m.palpite.quantidade) || 0
+      };
+    }
+    return out;
+  },
+
+  salvarUltimo(mercados, alvo=null) {
+    const palpites = this._extrair(mercados);
+    if (!Object.keys(palpites).length) return false;
+    const registro = {
+      criadoEm: new Date().toISOString(),
+      alvo: alvo ? { data: alvo.data, horario: alvo.horario, timeZone: alvo.timeZone } : null,
+      palpites
+    };
+    return this._salvar(this.CHAVE_ULTIMO, registro);
+  },
+
+  obterUltimo() {
+    const r = this._ler(this.CHAVE_ULTIMO);
+    return r?.palpites ? r : null;
+  },
+
+  registrarParaPartida(slot, palpites, origem="reabertura") {
+    if (!slot?.data || !slot?.horario || !palpites || !Object.keys(palpites).length) return false;
+    const mapa = this._ler(this.CHAVE);
+    const chave = `${slot.data}|${slot.horario}`;
+    if (mapa[chave]) return false;
+    mapa[chave] = {
+      partida: { data: slot.data, horario: slot.horario, timeZone: slot.timeZone || "Europe/London" },
+      criadoEm: new Date().toISOString(),
+      origem,
+      palpites
+    };
+    return this._salvar(this.CHAVE, mapa);
+  },
+
+  obterParaPartida(slot) {
+    if (!slot?.data || !slot?.horario) return null;
+    const mapa = this._ler(this.CHAVE);
+    return mapa[`${slot.data}|${slot.horario}`] || null;
+  },
+
+  obterTodos() { return this._ler(this.CHAVE); }
+};
+"use strict";
+
+const Interface = {
+    iniciar(){
+        const app=document.getElementById('app'); if(!app)return;
+        this.criarEstilos();
+        app.innerHTML=`<div class="painel">
+          <header><h1>Painel de Padrões Fictícios</h1><div id="hora-atual" class="hora-atual">🕒 Hora em Londres: --:--:--</div><div id="relogio-partidas" class="relogio-partidas">⚽ Horário da partida atual: --:-- · <b>Próximo jogo: --:--</b></div>
+            <div class="entrada-resultados">
+              <div class="rotulo-entrada">Registrar resultado do jogo encerrado</div>
+              <div id="botoes-resultados" class="botoes-resultados"></div><div id="status-horario-entrada" class="status-horario-entrada"></div>
+              <div class="resultado-personalizado"><button id="btn-outro-placar" class="cinza">Outro placar</button><input id="campo-outro-placar" inputmode="numeric" placeholder="Ex.: 5x2" hidden><button id="btn-confirmar-outro" class="azul" hidden>Registrar</button></div>
+              <div class="resultado-outro-horario"><button id="btn-outro-horario" class="cinza">Resultado de outro horário</button><div id="form-outro-horario" class="form-outro-horario" hidden><input id="campo-outro-horario" type="time" step="180" aria-label="Horário da partida"><div class="placar-outro-horario-separado"><input id="campo-outro-horario-casa" type="number" min="0" step="1" inputmode="numeric" placeholder="Casa" aria-label="Gols do time da casa"><span class="separador-x-outro-horario">x</span><input id="campo-outro-horario-fora" type="number" min="0" step="1" inputmode="numeric" placeholder="Visitante" aria-label="Gols do time visitante"></div><button id="btn-confirmar-outro-horario" class="azul">Registrar</button></div></div>
+            </div>
+            <div class="acoes"><button id="btn-salvar" class="verde">▣ Salvar na Pasta</button><button id="btn-carregar" class="ciano">▰ Carregar da Pasta</button><input id="arquivo-carregar" type="file" accept="application/json" hidden></div>
+          </header>
+          <div class="topo">
+            <section class="cartao azulb probabilidade"><h2>Probabilidade dos Próximos Resultados</h2><div class="cabecalho-probabilidade"><p><b>Resultados com horário: <span id="total-sessao">0</span></b></p><p>Último registro: <b id="ultimo-registro">-</b></p></div><div class="previsao">
+              <p class="proxima-partida-destaque">🎯 <b>PREVISÃO PARA O JOGO DAS <span id="proximo-horario">--:--</span></b></p><p id="palpite-registrado-status" class="palpite-registrado-status"></p><p>🎯 <b>Previsão combinada:</b> <span id="prev-combinada"></span></p>
+              <p>🎯 <b>Placar Exato:</b> <span id="prev-placar"></span></p>
+              <p>🏆 <b>Resultado (1X2):</b> <span id="prev-resultado"></span></p>
+              <p>📊 <b>Quantidade de Gols:</b> <span id="prev-gols"></span></p>
+              <p>🤝 <b>Ambos Marcam:</b> <span id="prev-btts"></span></p>
+              <p>⚽ <b>Over / Under 0.5:</b> <span id="prev-ou05"></span></p><p>🧊 <b>Especialista O/U0.5 (foco U):</b> <span id="prev-under05"></span></p>
+              <p>⚽ <b>Over / Under 1.5:</b> <span id="prev-ou15"></span></p>
+              <p>⚽ <b>Over / Under 2.5:</b> <span id="prev-ou25"></span></p>
+              <p>⚽ <b>Under 3.5 (filtro):</b> <span id="prev-ou35"></span></p><p>🔥 <b>Especialista O3.5:</b> <span id="prev-over35"></span></p>
+              <p>🔄 <b>Sequência temporal contínua:</b> <span id="sequencia-atual"></span></p><div class="ultimos-registros"><b>Últimos 10 resultados com horário:</b><div id="ultimos-sequencia"></div></div>
+            </div></section>
+          </div>
+          <section id="consultor-entradas" class="cartao consultor-entradas"><h2>🧭 Consultor de Entradas</h2><p class="muted">Calculando…</p></section>
+          <section class="cartao avancada"><h2>Análise Avançada de Gols e Ambos Marcam</h2>
+            <div class="mercados"><div><h3>📌 Resultado da Previsão Anterior</h3><div id="anterior"></div></div><div><h3>📊 Outros Mercados</h3><div id="outros"></div></div></div>
+            <div class="analise"><h3>🔍 Análise Antecipada de Padrões</h3>
+              <div id="grade-mercados" class="grade-mercados"></div>
+            </div>
+          </section>
+        </div>`;
+        this.eventos(); if(typeof RelogioPartidas!=='undefined'){ RelogioPartidas.iniciar(); RelogioPartidas.observar((a,atual,n)=>this.tickRelogioLeve(a,atual,n)); } this.atualizar(); console.log('Interface iniciada.');
+    },
+    eventos(){
+        const container=document.getElementById('botoes-resultados');
+        const resultadosRapidos=['0x0','1x0','0x1','1x1','2x0','0x2','2x1','1x2','2x2','3x0','0x3','3x1','1x3','3x2','2x3','3x3','4x0','0x4','4x1','1x4','4x2','2x4','4x3','3x4','4x4'];
+        container.innerHTML=resultadosRapidos.map(v=>`<button class="btn-placar" data-placar="${v}">${v}</button>`).join('');
+        container.querySelectorAll('.btn-placar').forEach(btn=>btn.onclick=()=>this.registrarRapido(btn.dataset.placar));
+        const outro=document.getElementById('btn-outro-placar'), campoOutro=document.getElementById('campo-outro-placar'), confirmar=document.getElementById('btn-confirmar-outro');
+        outro.onclick=()=>{campoOutro.hidden=!campoOutro.hidden;confirmar.hidden=campoOutro.hidden;if(!campoOutro.hidden)campoOutro.focus();};
+        confirmar.onclick=()=>{this.registrarRapido(campoOutro.value.trim());};
+        campoOutro.addEventListener('keydown',e=>{if(e.key==='Enter')confirmar.click();});
+
+        const btnOutroHorario=document.getElementById('btn-outro-horario');
+        const formOutroHorario=document.getElementById('form-outro-horario');
+        const campoOutroHorario=document.getElementById('campo-outro-horario');
+        const campoOutroHorarioCasa=document.getElementById('campo-outro-horario-casa');
+        const campoOutroHorarioFora=document.getElementById('campo-outro-horario-fora');
+        const confirmarOutroHorario=document.getElementById('btn-confirmar-outro-horario');
+        const montarPlacarOutroHorario=()=>{
+            const casa=String(campoOutroHorarioCasa.value ?? '').trim();
+            const fora=String(campoOutroHorarioFora.value ?? '').trim();
+            if(casa==='' || fora==='') return '';
+            return `${casa}x${fora}`;
+        };
+        btnOutroHorario.onclick=()=>{
+            formOutroHorario.hidden=!formOutroHorario.hidden;
+            if(!formOutroHorario.hidden){
+                const atual=typeof RelogioPartidas!=='undefined'?RelogioPartidas.partidaAnterior():null;
+                if(atual) campoOutroHorario.value=atual.horario;
+                campoOutroHorarioCasa.focus();
+            }
+        };
+        confirmarOutroHorario.onclick=()=>this.registrarOutroHorario(campoOutroHorario.value, montarPlacarOutroHorario());
+        [campoOutroHorario,campoOutroHorarioCasa,campoOutroHorarioFora].forEach(el=>el.addEventListener('keydown',e=>{if(e.key==='Enter')confirmarOutroHorario.click();}));
+        document.getElementById('btn-salvar').onclick=()=>{ const blob=new Blob([JSON.stringify(Historico.obterDadosBrutos(),null,2)],{type:'application/json'}); const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='esportes-virtuais-sessao.json'; a.click(); URL.revokeObjectURL(a.href); };
+        const file=document.getElementById('arquivo-carregar'); document.getElementById('btn-carregar').onclick=()=>file.click(); file.onchange=()=>{const f=file.files[0];if(!f)return;const r=new FileReader();r.onload=()=>{try{const d=JSON.parse(r.result);if(!Array.isArray(d))throw Error();Historico.carregarDados(d,true);Historico.definirBaseEstudo(Historico.obterQuantidade());localStorage.setItem('esportes_virtuais_base_estudo_base_zerada_qtd_v1',String(Historico.obterQuantidade()));this.atualizar();}catch(e){alert('Arquivo inválido.');}};r.readAsText(f);};
+    },
+    registrarRapido(v){
+        // Os botões de resultado do jogo encerrado só podem ser usados
+        // nos últimos 75 segundos antes do próximo slot começar.
+        if (typeof RelogioPartidas !== 'undefined' && !RelogioPartidas.janelaRegistroResultadoAberta()) {
+            this.atualizar();
+            return;
+        }
+        const alvoResultado = typeof RelogioPartidas !== 'undefined'
+            ? RelogioPartidas.partidaParaRegistrarResultado()
+            : null;
+        const r = Historico.adicionar(v, true, alvoResultado);
+        if (r && r.duplicado) {
+            alert(`O horário ${r.temporal.horario} já possui resultado registrado.\n\nCada partida aceita somente 1 resultado.`);
+            this.atualizar();
+            return;
+        }
+        if(!r){
+            alert('Placar inválido. Use o formato 2x1.');
+            return;
+        }
+        const campo=document.getElementById('campo-outro-placar');
+        if(campo){campo.value='';campo.hidden=true;document.getElementById('btn-confirmar-outro').hidden=true;}
+        if(typeof Sincronizacao!=='undefined'){ if(typeof Sincronizacao.publicarResultado==='function') Sincronizacao.publicarResultado(r); else Sincronizacao.sincronizarAgora(); }
+        if(typeof Aprendizado!=='undefined' && Aprendizado.aprenderIndice){
+            const todosApr=Historico.obterTodos();
+            const idxApr=todosApr.length-1;
+            setTimeout(()=>{ try{ Aprendizado.aprenderIndice(todosApr,idxApr); }catch(_){} },1200);
+        }
+        this.atualizar();
+    },
+    registrarOutroHorario(horario, placar){
+        if(typeof RelogioPartidas==='undefined'){alert('Relógio das partidas indisponível.');return;}
+        const alvo=RelogioPartidas.slotPorHorario(horario);
+        if(!alvo){
+            alert('Horário inválido. Use um horário de partida de 3 em 3 minutos, por exemplo 04:18.');
+            return;
+        }
+        const agora=RelogioPartidas.agora();
+        const atual=RelogioPartidas.partidaAtual();
+        const alvoMin=alvo.hora*60+alvo.minuto;
+        const atualMin=atual.hora*60+atual.minuto;
+        // O formulário é destinado a partidas anteriores. Não permite inserir
+        // uma partida futura por engano; resultados futuros continuam sendo
+        // registrados somente quando o relógio chegar ao slot.
+        const hoje=alvo.data===agora.data;
+        if(hoje && alvoMin>atualMin){
+            alert(`O horário ${alvo.horario} ainda é futuro. Aguarde a partida chegar ou informe uma partida anterior.`);
+            return;
+        }
+        const r=Historico.adicionar(placar,true,{...alvo,__fonte:'ao-vivo'});
+        if(r&&r.duplicado){
+            const existente=Historico.obterResultadoNoHorario(alvo);
+            alert(`O horário ${alvo.horario} já possui resultado registrado${existente?.placar?`: ${existente.placar}`:''}.`);
+            return;
+        }
+        if(!r){alert('Resultado inválido. Use o formato 2x1.');return;}
+        document.getElementById('campo-outro-horario').value='';
+        document.getElementById('campo-outro-horario-casa').value='';
+        document.getElementById('campo-outro-horario-fora').value='';
+        document.getElementById('form-outro-horario').hidden=true;
+        if(typeof Sincronizacao!=='undefined'){ if(typeof Sincronizacao.publicarResultado==='function') Sincronizacao.publicarResultado(r); else Sincronizacao.sincronizarAgora(); }
+        if(typeof Aprendizado!=='undefined' && Aprendizado.aprenderIndice){
+            const todosApr=Historico.obterTodos();
+            const idxApr=todosApr.length-1;
+            setTimeout(()=>{ try{ Aprendizado.aprenderIndice(todosApr,idxApr); }catch(_){} },1200);
+        }
+        this.atualizar();
+    },
+    atualizarEstadoBotoes() {
+        const container = document.getElementById('botoes-resultados');
+        const status = document.getElementById('status-horario-entrada');
+        const outro = document.getElementById('btn-outro-placar');
+        const confirmar = document.getElementById('btn-confirmar-outro');
+        if (!container || typeof RelogioPartidas === 'undefined') return;
+        const partidaEmJogo = RelogioPartidas.partidaAtual();
+        const partidaResultado = RelogioPartidas.partidaParaRegistrarResultado();
+        // Quando o relógio avança para um novo slot, qualquer slot anterior
+        // que não recebeu resultado é marcado separadamente como SEM DADOS.
+        // Ele não entra no histórico de placares e não contamina as sequências.
+        if(!this._ultimoSlotObservado){
+            this._ultimoSlotObservado=partidaEmJogo;
+        }else if(this._ultimoSlotObservado.data!==partidaEmJogo.data || this._ultimoSlotObservado.horario!==partidaEmJogo.horario){
+            let cursor=this._ultimoSlotObservado;
+            let guard=0;
+            while((cursor.data!==partidaEmJogo.data || cursor.horario!==partidaEmJogo.horario) && guard<100){
+                if(!Historico.temResultadoNoHorario(cursor)) Historico.registrarHorarioSemDados(cursor);
+                cursor=RelogioPartidas._addMinutes(cursor,3);
+                guard++;
+            }
+            this._ultimoSlotObservado=partidaEmJogo;
+        }
+        const registrado = Historico.obterResultadoNoHorario(partidaResultado);
+        const proxima = RelogioPartidas.proximaPartida();
+        const restante = RelogioPartidas.segundosAteProximaPartida();
+        const janelaRegistro = RelogioPartidas.janelaRegistroResultadoAberta();
+        const podeRegistrar = janelaRegistro && !registrado;
+
+        // Os botões de resultado do jogo encerrado ficam bloqueados até
+        // faltarem exatamente 1min15 para a próxima partida.
+        container.querySelectorAll('.btn-placar').forEach(btn => btn.disabled = !podeRegistrar);
+        if (outro) outro.disabled = !podeRegistrar;
+        if (confirmar) confirmar.disabled = !podeRegistrar;
+        if (status) {
+            const semDados=Historico.estaSemDados(partidaResultado);
+            const fmt = (s) => `${Math.floor(Math.max(0,s)/60)}:${String(Math.max(0,s)%60).padStart(2,'0')}`;
+            const segundosAteLiberar = Math.max(0, restante - RelogioPartidas.JANELA_REGISTRO_RESULTADO_SEGUNDOS);
+            const horarioLiberacao = RelogioPartidas.horarioLiberacaoRegistro();
+            status.innerHTML = registrado
+                ? `🔒 Resultado da partida <b>${partidaResultado.horario}</b> já registrado: <b>${registrado.placar}</b> · próxima partida: <b>${proxima.horario}</b>`
+                : semDados
+                    ? `⚪ Partida <b>${partidaResultado.horario}</b> ficou <b>SEM DADOS</b> · use “Resultado de outro horário” se descobrir depois · próxima partida: <b>${proxima.horario}</b>`
+                    : janelaRegistro
+                        ? `🟢 <b>Registro liberado</b> para a partida <b>${partidaResultado.horario}</b> · faltam <b>${fmt(restante)}</b> para a próxima partida <b>${proxima.horario}</b>`
+                        : `🔒 <b>Registro bloqueado</b> · será liberado às <b>${horarioLiberacao}</b> (faltam <b>${fmt(segundosAteLiberar)}</b>) · próxima partida: <b>${proxima.horario}</b>`;
+        }
+    },
+    tickRelogioLeve(a=null, atual=null, n=null){
+        if(typeof RelogioPartidas==='undefined') return;
+        a = a || RelogioPartidas.agora();
+        atual = atual || RelogioPartidas.partidaAtual();
+        n = n || RelogioPartidas.proximaPartida();
+
+        // Quando o painel moderno está ativo, o painel legado fica oculto.
+        // Não varremos 25 botões nem fazemos buscas no histórico a cada segundo.
+        // Isso era trabalho invisível no iPhone e ajudava a travar a thread principal.
+        const moderno = Boolean(document.getElementById('ia-shell'));
+        if(!moderno){
+            const hora=document.getElementById('hora-atual'), el=document.getElementById('relogio-partidas'), ph=document.getElementById('proximo-horario');
+            if(hora) hora.innerHTML=`🕒 Hora em Londres: <b>${String(a.hour).padStart(2,'0')}:${String(a.minute).padStart(2,'0')}:${String(a.second).padStart(2,'0')}</b>`;
+            if(el) el.innerHTML=`⚽ Horário da partida atual: <b>${atual.horario}</b> · <b>Próximo jogo: ${n.horario}</b>`;
+            if(ph) ph.textContent=n.horario;
+            this.atualizarEstadoBotoes();
+        }
+        if(typeof this._atualizarRelogioModerno==='function') this._atualizarRelogioModerno({agora:a,atual,proxima:n});
+
+        const assinatura=`${atual?.data||''}|${atual?.horario||''}|${n?.data||''}|${n?.horario||''}`;
+        if(this._ultimoSlotTickLeve==null){ this._ultimoSlotTickLeve=assinatura; return; }
+        if(this._ultimoSlotTickLeve!==assinatura){
+            // A única atualização completa comandada pelo relógio acontece
+            // quando realmente muda o slot de 3 minutos.
+            this._ultimoSlotTickLeve=assinatura;
+            this.atualizar();
+        }
+    },
+    status(ok){return ok?'<span class="green">✓ GREEN</span>':'<span class="red">✕ RED</span>';},
+    pct(v){return `${v.toFixed(1)}%`;},
+    atualizar(){
+        const r=Historico.obterTodos(), ultimo=Historico.obterUltimoAoVivo(), seq=Historico.obterSequenciaAtual();
+        if(typeof RelogioPartidas!=='undefined'){ const a=RelogioPartidas.agora(), atual=RelogioPartidas.partidaAtual(), n=RelogioPartidas.proximaPartida(); const hora=document.getElementById('hora-atual'), el=document.getElementById('relogio-partidas'), ph=document.getElementById('proximo-horario'); if(hora)hora.innerHTML=`🕒 Hora em Londres: <b>${String(a.hour).padStart(2,'0')}:${String(a.minute).padStart(2,'0')}:${String(a.second).padStart(2,'0')}</b>`; if(el)el.innerHTML=`⚽ Horário da partida atual: <b>${atual.horario}</b> · <b>Próximo jogo: ${n.horario}</b>`; if(ph)ph.textContent=n.horario; }
+        this.atualizarEstadoBotoes();
+        // A janela de 1min15 é EXCLUSIVA dos botões de registro do resultado.
+        // Ela não controla a liberação das previsões.
+        const liberado = seq.length>=3;
+        const statusPalpite=document.getElementById('palpite-registrado-status');
+        if(statusPalpite && typeof RelogioPartidas!=='undefined' && typeof PalpitesRegistrados!=='undefined'){
+            const atual=RelogioPartidas.partidaAtual();
+            const reg=PalpitesRegistrados.obterParaPartida(atual);
+            // Não mostrar a janela de 1min15 aqui: ela pertence somente ao
+            // registro do resultado encerrado.
+            statusPalpite.innerHTML=reg
+              ? `📝 <b>Palpite registrado para o jogo das ${atual.horario}</b> · recuperado na abertura do app`
+              : '';
+        }
+
+        const dados=Previsoes.gerar(r,seq,{liberarPalpite:liberado}).mercados; if(liberado && typeof PalpitesRegistrados!=='undefined' && typeof RelogioPartidas!=='undefined') PalpitesRegistrados.salvarUltimo(dados,RelogioPartidas.proximaPartida()); const resumoGreenRed=GreenRed.resumo(r), anterior=resumoGreenRed.anterior, sequencias=resumoGreenRed.sequencias, p=this.pct.bind(this);
+        const eventosSessao=typeof Historico.obterUltimosEventosSessao==='function'?Historico.obterUltimosEventosSessao(10):seq.slice(-10).map(x=>({tipo:'resultado',placar:x.placar,horario:x?._temporal?.horario||''}));
+        const ultimoEvento=eventosSessao.at(-1)||null;
+        document.getElementById('total-sessao').textContent=seq.length;
+        document.getElementById('ultimo-registro').textContent=ultimoEvento?`${ultimoEvento.placar} · ${ultimoEvento.horario||'--:--'}`:'-';
+        document.getElementById('sequencia-atual').textContent=seq.length;
+        document.getElementById('ultimos-sequencia').innerHTML=eventosSessao.length?eventosSessao.map(x=>`<span title="${x.data||''} ${x.horario||''}"><b>${x.horario||'--:--'}</b> ${x.placar}</span>`).join('<b class="seta">→</b>'):'<span class="muted">Nenhum resultado com horário registrado.</span>';
+        const adapter={exato:MercadoPlacarExato,gols:MercadoGolsExatos,r12:MercadoResultado1X2,bm:MercadoAmbosMarcam,ou05:MercadoOverUnder05,under05:MercadoUnder05,ou15:MercadoOverUnder15,ou25:MercadoOverUnder25,ou35:MercadoOverUnder35,over35:MercadoOver35};
+        const texto=k=>{
+            const d=dados[k];
+            if(!(d?.ativo&&d?.palpite))return '⏳ Aguardando atualizações';
+            if(k==='under05'&&d.probabilidades){
+                const o=Number(d.probabilidades.MAIS)||0,u=Number(d.probabilidades.MENOS)||0;
+                const alerta=d.alertaUnder?.nivel?` · alerta U: ${d.alertaUnder.nivel}`:'';
+                return `<b>${adapter[k].rotulo(d.palpite.valor)}</b> · O ${p(o)} | U ${p(u)}${alerta}`;
+            }
+            return `${adapter[k].rotulo(d.palpite.valor)} <small>(${p(d.palpite.percentual)})</small>`;
+        };
+        const freqs=(k,vals)=>vals.map(([v,label])=>{const x=dados[k]?.frequencias.lista.find(a=>a.valor===v);return `<p>• ${label}: <b>${x?p(x.percentual):'—'}</b></p>`}).join('');
+        const desc=k=>{
+            const d=dados[k],pd=d?.padrao;
+            if(k==='under05'){
+                const a=d?.alertaUnder||{};
+                const ctx=Array.isArray(pd?.contexto)?pd.contexto.map(v=>v==='MAIS'?'O':'U').join(' → '):'';
+                const padrao=pd?.encontrado?`padrão ${ctx||'O/U'} · ${pd.ocorrencias?.length||0} ocorrência(s) · U depois do padrão ${p(pd.taxaUnder||0)}`:'nenhum padrão binário forte agora';
+                return `🧠 ${padrao}. O padrão é apenas apoio. Alerta U: <b>${a.nivel||'—'}</b> · corrida atual de O: <b>${a.corridaOver??0}</b>.`;
+            }
+            if(d?.ativo&&pd){const oc=pd.ocorrencias?.length||0,tam=pd.tamanho||0,ctx=Array.isArray(pd.contexto)?pd.contexto.join(' → '):'';return `🔵 PADRÃO ENCONTRADO · ${oc} ocorrência(s) · sequência de ${tam}${ctx?`: ${ctx}`:''}`;}
+            return `⚪ PADRÃO NÃO IDENTIFICADO para a sequência atual. O histórico completo continua sendo estudado; sem evidência suficiente, este mercado apenas aguarda e não entra.`;
+        };
+        document.getElementById('prev-combinada').innerHTML=liberado?'Motor experimental: histórico completo estudado · previsão liberada':'⏳ Previsão aguardando '+Math.max(0,3-seq.length)+' resultado(s) novo(s) para liberar o palpite';
+        document.getElementById('prev-placar').innerHTML=texto('exato');
+        document.getElementById('prev-resultado').innerHTML=texto('r12');
+        document.getElementById('prev-gols').innerHTML=texto('gols');
+        document.getElementById('prev-btts').innerHTML=texto('bm');
+        document.getElementById('prev-ou05').innerHTML=texto('ou05');
+        document.getElementById('prev-under05').innerHTML=texto('under05');
+        document.getElementById('prev-ou15').innerHTML=texto('ou15');
+        document.getElementById('prev-ou25').innerHTML=texto('ou25');
+        document.getElementById('prev-ou35').innerHTML=dados.ou35?.bloqueado?`🚫 Bloqueado — ${dados.ou35.motivoBloqueio}`:texto('ou35');
+        document.getElementById('prev-over35').innerHTML=texto('over35');
+        const historicoForma=(st)=>{const ultimos=(st?.historico||[]).slice(-5);if(!ultimos.length)return '<span class="muted">Sem histórico</span>';return `<span class="forma-historico" title="Últimos ${ultimos.length} resultados">${ultimos.map((v,i)=>`<span class="bolinha ${v==='GREEN'?'bolinha-green':'bolinha-red'}" title="${v}" aria-label="${v}"></span>`).join('')}</span>`;};
+        const resumoLados05=st=>{
+            const lados=st?.porLado;if(!lados)return '';
+            const o=lados.MAIS||{},u=lados.MENOS||{};
+            const pctL=x=>x?.chamadas?p(x.acerto):'—';
+            return `<div class="desempenho-lados-05"><span>O0.5: 🟢 ${o.greens||0} / 🔴 ${o.reds||0} · ${pctL(o)}</span><span>U0.5: 🟢 ${u.greens||0} / 🔴 ${u.reds||0} · ${pctL(u)}</span></div>`;
+        };
+        const ordemResultados={r12:['1','X','2'],bm:['SIM','NÃO'],gols:['0','1','2','3','4','5'],ou05:['MAIS','MENOS'],under05:['MAIS','MENOS'],ou15:['MAIS','MENOS'],ou25:['MAIS','MENOS'],ou35:['MENOS','MAIS'],over35:['MAIS','MENOS']};
+        const rotuloResultado=(k,v)=>{
+            if(k==='gols')return MercadoGolsExatos.rotulo(v);
+            if(adapter[k]?.rotulo)return adapter[k].rotulo(v);
+            return String(v);
+        };
+        const resumoIndividual=(k,st)=>{
+            const mapa=st?.porResultado||{};let itens=Object.values(mapa);if(!itens.length)return '';
+            const ordem=ordemResultados[k]||[];
+            itens.sort((a,b)=>{const ia=ordem.indexOf(String(a.valor)),ib=ordem.indexOf(String(b.valor));if(ia>=0||ib>=0)return (ia<0?999:ia)-(ib<0?999:ib);return (b.chamadas||0)-(a.chamadas||0)||String(a.valor).localeCompare(String(b.valor));});
+            const chips=itens.map(x=>{const ac=x.chamadas?p(x.acerto):'—',cap=x.ocorrencias?p(x.captura):'—',tx=p(Number(x.taxaChamada)||0);return `<span class="taxa-individual"><b>${rotuloResultado(k,x.valor)}</b> · cham. ${x.chamadas||0} (${tx}) · 🟢 ${x.greens||0}/🔴 ${x.reds||0} · acerto ${ac} · captura ${cap}</span>`;}).join('');
+            return `<details class="taxas-individuais"><summary>📊 Taxas por resultado</summary><div class="taxas-individuais-grid">${chips}</div></details>`;
+        };
+        const linha=(titulo,k)=>{const st=sequencias[k]; const forma=historicoForma(st); const lados=k==='under05'?resumoLados05(st):''; const individual=resumoIndividual(k,st); if(!anterior||typeof anterior[k]!=='boolean')return `<div class="item-mercado"><div>• <b>${titulo}:</b> <span class="muted">Aguardando dados</span></div><div class="previsto">Previsto: ${texto(k)}</div><div class="sequencia-individual muted">Sequência: Aguardando dados</div>${lados}<div class="historico-forma"><span>Últimos 5:</span>${forma}</div>${individual}</div>`; const ok=anterior[k];const t=st.tipo==='GREEN'?`🔥 <b>${st.atual} GREEN${st.atual===1?'':'S'} consecutivo${st.atual===1?'':'s'}</b>`:`🔴 <b>${st.atual} RED${st.atual===1?'':'S'} consecutivo${st.atual===1?'':'s'}</b>`;return `<div class="item-mercado"><div>• <b>${titulo}:</b> ${this.status(ok)}</div><div class="previsto">Previsto: ${anterior.previsoes[k]||texto(k)}</div><div class="sequencia-individual ${st.tipo==='GREEN'?'green':'red'}">Sequência: ${t}</div>${lados}<div class="historico-forma"><span>Últimos ${Math.min((st.historico||[]).length,5)}:</span>${forma}</div>${individual}</div>`;};
+        document.getElementById('anterior').innerHTML=linha('Placar Exato','exato')+linha('Over / Under 0.5','ou05')+linha('Especialista O/U0.5 (foco U)','under05')+linha('Over / Under 1.5','ou15')+linha('Under 3.5 (filtro)','ou35');
+        document.getElementById('outros').innerHTML=linha('Especialista O3.5','over35')+linha('Over / Under 2.5','ou25')+linha('Resultado (1X2)','r12')+linha('Quantidade de Gols','gols')+linha('Ambos Marcam','bm');
+        // Painéis de análise padronizados: cada mercado mostra probabilidades, tendência e o padrão que encontrou.
+        const tituloTendencia=(k)=>{
+            const d=dados[k];
+            if(k==='under05'&&d?.probabilidades){
+                const escolha=d?.palpite?adapter[k].rotulo(d.palpite.valor):'—';
+                return `🎯 Chamada obrigatória: <span class="green">${escolha}</span> · leitura O ${p(d.probabilidades.MAIS)} | U ${p(d.probabilidades.MENOS)} · foco: acertar U quando o risco relativo subir`;
+            }
+            const fonte=d?.frequenciasHistorico||d?.frequencias;const top=fonte?.lista?.[0];if(!top)return '🎯 Tendência histórica: <span class="muted">Sem histórico</span>';const label=adapter[k]?.rotulo?adapter[k].rotulo(top.valor):top.valor;const entrada=d?.palpite?` · Entrada: <span class="green">${adapter[k].rotulo(d.palpite.valor)} (${p(d.palpite.percentual)})</span>`:' · Entrada: <span class="muted">⏳ AGUARDAR — padrão não identificado</span>';return `🎯 Tendência histórica: <span class="green">${label} (${p(top.percentual)})</span>${entrada}`;
+        };
+        const sequenciaPadrao=(k)=>`<h4>📌 Sequência</h4><p>${desc(k)}</p>`;
+        const aprendizado=(k)=>{const a=(typeof Aprendizado!=='undefined')?Aprendizado.resumo(r,k,dados[k]):{texto:'🧠 Aprendizado indisponível',classe:'muted',sugestao:'⚪ SUGESTÃO: Dados insuficientes',classeSugestao:'muted'};return `<div class="aprendizado ${a.classe}">${a.texto}<div class="sugestao ${a.classeSugestao||'muted'}">${a.sugestao||''}</div></div>`;};
+        const temporal=(k)=>{const t=dados[k]?.temporal;if(!t)return '';const classe=t.disponivel?'temporal-ativo':'temporal-aguardando';return `<div class="analise-temporal ${classe}">${t.texto}${t.disponivel&&t.forte?`<div>💡 Sugestão temporal: <b>${adapter[k].rotulo?adapter[k].rotulo(t.forte.tendencia):t.forte.tendencia}</b></div>`:''}</div>`;};
+        const bloco=(titulo,conteudo,k)=>{const st=sequencias[k]||{};const tg=Number(st.totalGreens)||0,tr=Number(st.totalReds)||0;const lados=k==='under05'?resumoLados05(st):'';return `<section class="painel-mercado"><h3>${titulo}</h3><div class="totais-mercado"><span class="total-green">🟢 GREEN: ${tg}</span><span class="total-red">🔴 RED: ${tr}</span></div>${lados}${conteudo}<h4>${tituloTendencia(k)}</h4>${sequenciaPadrao(k)}${aprendizado(k)}${temporal(k)}</section>`;};
+        const freqLista=(k,vals)=>{const fonte=dados[k]?.frequenciasHistorico||dados[k]?.frequencias;return vals.map(([v,label])=>{const x=fonte?.lista?.find(a=>String(a.valor)===String(v));return `<p>• ${label}: <b>${x?p(x.percentual):'—'}</b></p>`}).join('');};
+        const freqTop=(k,limite=3)=>{
+            const fonte=dados[k]?.frequenciasHistorico||dados[k]?.frequencias;
+            const lista=[...(fonte?.lista||[])].sort((a,b)=>b.percentual-a.percentual).slice(0,limite);
+            return lista.length?lista.map(x=>`<p>• ${adapter[k].rotulo(x.valor)}: <b>${p(x.percentual)}</b></p>`).join(''):'<p class="muted">• Aguardando atualizações</p>';
+        };
+        const golsLista=()=>{const fonte=dados.gols?.frequenciasHistorico||dados.gols?.frequencias;return [0,1,2,3,4,5].map(g=>{const x=(fonte?.lista||[]).find(a=>Number(a.valor)===g);return `<p>• ${g===5?'5 ou mais gols':g+' gol'+(g===1?'':'s')}: <b>${x?p(x.percentual):'—'}</b></p>`}).join('');};
+
+        // Mantém o painel superior de resultado da previsão anterior, onde GREEN/RED realmente pertence.
+        // Grade visual: seis cartões independentes, aproveitando toda a largura disponível.
+        const paineis = [
+          bloco('🎯 Placar Exato', freqTop('exato',3), 'exato'),
+          bloco('🏆 Resultado do Jogo (1X2)', freqLista('r12', [['1','Vitória da Casa'],['X','Empate'],['2','Vitória do Visitante']]), 'r12'),
+          bloco('🤝 Ambos Marcam', freqLista('bm', [['SIM','SIM'],['NÃO','NÃO']]), 'bm'),
+          bloco('📊 Quantidade de Gols', golsLista(), 'gols'),
+          bloco('⚽ Over / Under 0.5', freqLista('ou05', [['MENOS','Menos de 0.5'],['MAIS','Mais de 0.5']]), 'ou05'),
+          bloco('🧊 Especialista O/U0.5 (foco U)', (()=>{const d=dados.under05||{};const h=d.frequenciasHistorico||{};const ho=(h.lista||[]).find(x=>x.valor==='MAIS'),hu=(h.lista||[]).find(x=>x.valor==='MENOS');return `<p>• Leitura atual O0.5: <b>${p(d.probabilidades?.MAIS||0)}</b></p><p>• Leitura atual U0.5: <b>${p(d.probabilidades?.MENOS||0)}</b></p><p>• Histórico O0.5: <b>${ho?p(ho.percentual):'—'}</b></p><p>• Histórico U0.5: <b>${hu?p(hu.percentual):'—'}</b></p>`;})(), 'under05'),
+          bloco('⚽ Over / Under 1.5', freqLista('ou15', [['MENOS','Menos de 1.5'],['MAIS','Mais de 1.5']]), 'ou15'),
+          bloco('⚽ Over / Under 2.5', freqLista('ou25', [['MENOS','Menos de 2.5'],['MAIS','Mais de 2.5']]), 'ou25'),
+          bloco('⚽ Under 3.5 (filtro)', freqLista('ou35', [['MENOS','Menos de 3.5']]), 'ou35'),
+          bloco('🔥 Especialista O3.5', freqLista('over35', [['MAIS','Mais de 3.5']]), 'over35')
+        ];
+        document.getElementById('grade-mercados').innerHTML=paineis.join('');
+        if(typeof ConsultorEntradas!=='undefined' && ConsultorEntradas.atualizar){ ConsultorEntradas.atualizar({resultados:r,mercados:dados,liberado}); }
+    },
+    criarEstilos(){ if(document.getElementById('estilos-painel'))return; const st=document.createElement('style');st.id='estilos-painel';st.textContent=`*{box-sizing:border-box}body{margin:0;padding:10px;background:#eee;font-family:Arial,sans-serif;color:#1e293b;font-size:14px}.painel{max-width:1320px;margin:auto;background:#fff;border:1px solid #d6dce5;border-radius:4px;padding:14px;box-shadow:0 1px 4px #bbb}h1{margin:0 0 6px;font-size:22px}.hora-atual{display:block;width:max-content;max-width:100%;margin:0 0 5px;padding:7px 10px;background:#f7f8fa;border:1px solid #d9dee5;border-radius:6px;font-size:15px}.relogio-partidas{display:block;width:max-content;max-width:100%;margin:0 0 12px;padding:7px 10px;background:#eef4fb;border:1px solid #cbd9ea;border-radius:6px;font-size:13px}.proxima-partida-destaque{font-size:18px!important;padding:9px 10px;background:#eef7ff;border-left:4px solid #2684d9;border-radius:5px}.palpite-registrado-status{margin:5px 0 9px;padding:6px 9px;background:#edf9f0;border-left:4px solid #24a34a;border-radius:5px;color:#155d28;font-size:13px}.analise-temporal{margin-top:10px;padding:9px;border-radius:6px;font-size:13px;line-height:1.4}.temporal-aguardando{background:#f5f5f5;color:#666;border:1px dashed #ccc}.temporal-ativo{background:#edf9f0;border:1px solid #b9dfc1;color:#155d28}h2{font-size:17px;margin:0 0 14px}h3,h4{font-size:13px;margin:12px 0 8px}p{margin:6px 0;line-height:1.35}.entrada-resultados{display:flex;flex-direction:column;gap:8px}.rotulo-entrada{font-weight:bold;font-size:14px}.botoes-resultados{display:grid;grid-template-columns:repeat(5,minmax(52px,1fr));gap:6px}.btn-placar{border:1px solid #b8c3d0;background:#fff;color:#1e293b;border-radius:6px;padding:9px 5px;font-size:15px;font-weight:bold;cursor:pointer;min-height:40px}.btn-placar:active{transform:scale(.97);background:#eaf3ff}.resultado-personalizado{display:flex;gap:6px;align-items:center}.resultado-personalizado input{height:38px;border:1px solid #c5ccd5;padding:8px;font-size:14px;flex:1}.entrada-resultados>button,.resultado-personalizado button,.acoes button{border:0;padding:9px 15px;color:#fff;font-weight:bold;font-size:13px;cursor:pointer;border-radius:2px}.cinza{background:#64748b!important;color:#fff!important}.amarelo{background:#ffc107!important;color:#222!important}.azul{background:#2684d9}.verde{background:#199c53}.ciano{background:#278ea5}.acoes{margin:10px 0 12px;padding:9px;background:#dfe5ed}.topo{display:grid;grid-template-columns:1fr;gap:12px}.probabilidade{min-height:auto}.cabecalho-probabilidade{display:flex;gap:28px;flex-wrap:wrap;margin-bottom:8px}.probabilidade .previsao{display:grid;grid-template-columns:1fr 1fr;column-gap:30px;row-gap:2px}.cartao{background:#f5f7fa;border-left:3px solid #2784e8;padding:13px;min-height:250px}.avancada{border-left-color:#24a34a;margin-top:12px;min-height:auto}.ultimos-registros{margin-top:8px;line-height:2.1}.ultimos-registros b{font-size:13px}.ultimos-registros span{display:inline-block;font-size:14px}.registro-vazio{padding:1px 5px;border:1px dashed #94a3b8;border-radius:4px;background:#f8fafc;color:#64748b;font-weight:bold;font-size:12px!important}.seta{margin:0 5px;color:#64748b}.streak{margin:5px 0}.mercados{display:grid;grid-template-columns:1fr 1fr;gap:18px;border:1px solid #cbd3dc;border-radius:10px;background:#fff;padding:15px}.mercados h3{font-size:16px;margin:3px 0 14px}.item-mercado{margin:0 0 9px;padding:8px 10px;border:1px solid #edf0f4;border-radius:7px;background:#fbfcfd;font-size:16px;line-height:1.3}.item-mercado>div:first-child{font-size:17px}.previsto{margin-left:0;color:#596273;font-size:14px}.sequencia-individual{margin-top:2px;font-size:14px}.historico-forma{display:flex;align-items:center;gap:7px;margin-top:4px;font-size:13px;color:#596273;font-weight:bold}.desempenho-lados-05{display:flex;gap:10px;flex-wrap:wrap;margin-top:5px;padding:5px 7px;border:1px dashed #cbd5e1;border-radius:5px;background:#f8fafc;font-size:12px;font-weight:bold}.desempenho-lados-05 span{white-space:nowrap}.taxas-individuais{margin-top:5px;border-top:1px dashed #d9dee5;padding-top:4px}.taxas-individuais summary{cursor:pointer;color:#526173;font-size:12px;font-weight:bold;user-select:none}.taxas-individuais-grid{display:flex;gap:5px;flex-wrap:wrap;margin-top:5px;max-height:150px;overflow:auto}.taxa-individual{display:inline-block;padding:3px 5px;border:1px solid #d9dee5;border-radius:4px;background:#f8fafc;font-size:11px;line-height:1.25;white-space:normal}.forma-historico{display:inline-flex;align-items:center;gap:6px}.bolinha{width:13px;height:13px;border-radius:50%;display:inline-block;border:1px solid rgba(0,0,0,.12);box-shadow:inset 0 1px 1px rgba(255,255,255,.35),0 1px 2px rgba(0,0,0,.16)}.bolinha-green{background:#25a95a}.bolinha-red{background:#df4050}.grade-mercados{column-count:3;column-gap:16px;margin-top:12px}.painel-mercado{display:inline-block;width:100%;vertical-align:top;break-inside:avoid;-webkit-column-break-inside:avoid;page-break-inside:avoid;margin:0 0 16px;background:#fff;border:1px solid #cbd3dc;border-radius:10px;padding:14px;min-width:0;min-height:0;box-shadow:0 1px 2px rgba(0,0,0,.04)}.painel-mercado h3{font-size:17px;margin:2px 0 6px;padding-bottom:8px;border-bottom:1px solid #e1e6ec}.totais-mercado{display:flex;gap:14px;flex-wrap:wrap;margin:0 0 10px;padding:5px 7px;background:#f7f8fa;border:1px solid #e2e6eb;border-radius:5px;font-size:13px;font-weight:bold}.total-green{color:#159447}.total-red{color:#df4050}.painel-mercado h4{font-size:15px;margin:13px 0 7px}.painel-mercado p{font-size:14px;overflow-wrap:anywhere}.aprendizado{margin-top:12px;padding-top:9px;border-top:1px dashed #d9dee5;font-size:13px;line-height:1.4;font-weight:bold}.sugestao{margin-top:7px;font-size:14px;font-weight:bold}.analise h4{font-size:14px}.green{color:#159447;font-weight:bold}.red{color:#df4050;font-weight:bold}.blue{color:#1875d1;font-weight:bold}.muted{color:#777}.limpar{width:100%;margin-top:12px;border:0;background:#df3742;color:white;padding:10px;font-weight:bold;cursor:pointer;font-size:13px}@media(max-width:900px){.grade-mercados{column-count:2}}
+/* ===== CONTROLE DE 1 RESULTADO POR PARTIDA ===== */
+.status-horario-entrada{margin-top:2px;font-size:12px;font-weight:bold;color:#526173;min-height:18px}
+.btn-placar{padding:6px 4px!important;min-height:34px!important;height:34px!important;font-size:14px!important;line-height:1!important;touch-action:manipulation!important;-webkit-tap-highlight-color:transparent!important}
+.btn-placar:disabled{opacity:.45;cursor:not-allowed;filter:grayscale(.4)}
+.entrada-resultados .resultado-personalizado{margin-top:2px}
+.resultado-outro-horario{display:flex;align-items:center;gap:6px;flex-wrap:wrap}.form-outro-horario{display:flex;align-items:center;gap:6px;flex:1;min-width:360px}.form-outro-horario>input{height:38px;border:1px solid #c5ccd5;padding:6px 8px;font-size:14px;border-radius:3px}.form-outro-horario input[type=time]{width:105px;flex:0 0 105px}.placar-outro-horario-separado{display:flex;align-items:center;gap:6px;flex:1;min-width:180px}.placar-outro-horario-separado input{width:92px;min-width:0;height:38px;border:1px solid #c5ccd5;padding:6px 8px;font-size:16px;border-radius:3px;text-align:center}.separador-x-outro-horario{font-size:18px;font-weight:bold;color:#526173}.resultado-outro-horario button{white-space:nowrap}
+@media(max-width:700px){.resultado-outro-horario{align-items:stretch}.form-outro-horario{width:100%;min-width:0;display:grid;grid-template-columns:1fr;gap:7px}.form-outro-horario input[type=time]{width:100%;min-width:0;height:44px;font-size:16px}.placar-outro-horario-separado{display:grid;grid-template-columns:1fr 24px 1fr;width:100%;min-width:0}.placar-outro-horario-separado input{width:100%;height:44px;font-size:18px}.separador-x-outro-horario{text-align:center}.form-outro-horario button{min-height:44px}}
+@media(max-width:700px){.botoes-resultados{grid-template-columns:repeat(5,minmax(44px,1fr));gap:5px}.btn-placar{min-height:34px!important;height:34px!important;font-size:14px!important;padding:5px 3px!important}.status-horario-entrada{font-size:12px}}
+@media(max-width:700px){body{font-size:15px}.botoes-resultados{grid-template-columns:repeat(5,1fr)}.topo,.mercados,.probabilidade .previsao{grid-template-columns:1fr}.grade-mercados{column-count:1}.entrada{flex-wrap:wrap}.entrada input{flex-basis:100%}.lista{grid-template-columns:1fr}.item-mercado{font-size:15px;padding:8px}.item-mercado>div:first-child{font-size:16px}}
+/* ===== ADAPTAÇÃO MOBILE/PWA — somente visual ===== */
+@supports (padding: env(safe-area-inset-top)) {
+  body {
+    padding-top: calc(10px + env(safe-area-inset-top));
+    padding-right: calc(10px + env(safe-area-inset-right));
+    padding-bottom: calc(10px + env(safe-area-inset-bottom));
+    padding-left: calc(10px + env(safe-area-inset-left));
+  }
+}
+button, input { touch-action: manipulation; }
+button { -webkit-tap-highlight-color: transparent; }
+@media (max-width: 700px) {
+  body { padding: 8px; overflow-x: hidden; }
+  .painel { width: 100%; padding: 10px; border-radius: 8px; }
+  h1 { font-size: 20px; }
+  h2 { font-size: 16px; }
+  .entrada { gap: 7px; }
+  .entrada input {
+    width: 100%;
+    min-width: 0;
+    height: 44px;
+    font-size: 16px;
+    border-radius: 7px;
+  }
+  .entrada button, .acoes button {
+    min-height: 44px;
+    flex: 1 1 auto;
+    padding: 10px 12px;
+    border-radius: 7px;
+    font-size: 14px;
+  }
+  .acoes {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 7px;
+    padding: 8px;
+    border-radius: 7px;
+  }
+  .acoes button { flex: 1 1 140px; }
+  .cartao { padding: 11px; }
+  .probabilidade .previsao { gap: 0; }
+  .probabilidade .previsao p { margin: 8px 0; }
+  .mercados { padding: 10px; gap: 16px; border-radius: 8px; }
+  .item-mercado { font-size: 15px; }
+  .item-mercado > div:first-child { font-size: 16px; }
+  .painel-mercado { padding: 12px; border-radius: 8px; }
+  .painel-mercado h3 { font-size: 16px; }
+  .totais-mercado { gap: 8px; font-size: 12px; }
+  .painel-mercado p { font-size: 13px; }
+  .limpar { min-height: 44px; border-radius: 7px; font-size: 14px; }
+}
+
+/* ===== CONSULTOR DE ENTRADAS — SOMENTE VISUAL/LEITURA ===== */
+.consultor-entradas{margin-top:12px;min-height:0;border-left-color:#7c3aed;background:#faf8ff}.consultor-entradas h2{margin-bottom:9px}.consultor-status{padding:10px 12px;border-radius:7px;margin-bottom:9px;font-size:16px}.consultor-entrar{background:#eaf8ef;border:1px solid #a9ddba;color:#12652f}.consultor-aguardar{background:#f4f5f7;border:1px solid #d5d9df;color:#5d6570}.consultor-pular{background:#fff3e5;border:1px solid #f0c78e;color:#8a4b00}.consultor-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:9px}.consultor-pick{background:#fff;border:1px solid #d9dce5;border-radius:8px;padding:10px}.consultor-pick-topo{display:flex;justify-content:space-between;gap:8px;margin-bottom:6px}.consultor-pick-topo strong{color:#6d28d9}.consultor-mercado{font-size:16px;font-weight:bold;margin-bottom:5px}.consultor-detalhe,.consultor-motivo,.consultor-nota,.consultor-regra,.consultor-candidatos{font-size:12px;line-height:1.45;color:#596273}.consultor-motivo{margin-top:5px}.consultor-regra{margin:9px 0 4px}.consultor-nota{margin-top:7px;color:#737b86}.consultor-ultima{margin-top:8px;padding-top:8px;border-top:1px dashed #d5d9df;font-size:12px}.consultor-mini{display:inline-block;margin:3px 4px 0 0;padding:3px 5px;border-radius:4px;background:#fff}.consultor-green{color:#157c3b}.consultor-red{color:#c62f40}@media(max-width:700px){.consultor-grid{grid-template-columns:1fr}.consultor-status{font-size:15px}.consultor-mercado{font-size:15px}}
+
+
+`;
+document.head.appendChild(st); }
+};
+"use strict";
+
+/*
+ * VAI NA FÉ VIRTUAL — Interface moderna (camada visual)
+ * Mantém intactos os motores de histórico, padrões, previsão, aprendizado e sincronização.
+ * Quando uma informação não existe no projeto, a tela mostra "Aguardando configurações".
+ */
+(function(){
+  if (typeof Interface === "undefined") return;
+
+  const originalIniciar = Interface.iniciar.bind(Interface);
+  const originalAtualizar = Interface.atualizar.bind(Interface);
+  const AGUARDA = "Aguardando configurações";
+
+  const esc = (v) => String(v ?? "").replace(/[&<>\"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+  const pct = v => Number.isFinite(Number(v)) ? `${Math.round(Number(v))}%` : AGUARDA;
+
+  Interface._paginaModerna = "visao";
+
+  Interface.iniciar = function(){
+    originalIniciar();
+    const legado = document.querySelector("#app > .painel");
+    if (legado) { legado.classList.add("ia-legado"); legado.setAttribute("aria-hidden","true"); }
+    this._criarInterfaceModerna();
+    this._eventosModernos();
+    this._renderModerno();
+  };
+
+  Interface.atualizar = function(){
+    // No painel moderno o legado fica oculto. Reexecutar a atualização legada
+    // fazia toda a cadeia de previsões/GreenRed/consultor rodar uma segunda vez
+    // a cada mudança de dados. Depois que o shell moderno existe, atualizamos
+    // somente a interface moderna. O legado é atualizado uma única vez na
+    // abertura, antes do shell ser criado, apenas para manter compatibilidade.
+    if (!document.getElementById("ia-shell")) originalAtualizar();
+    this._renderModerno();
+  };
+
+  Interface._criarInterfaceModerna = function(){
+    if (document.getElementById("ia-shell")) return;
+    const shell = document.createElement("div");
+    shell.id = "ia-shell";
+    shell.className = "ia-shell";
+    shell.innerHTML = `
+      <aside class="ia-sidebar">
+        <div class="ia-brand"><div class="ia-logo">◈</div><div class="ia-brand-text"><strong>VAI NA FÉ</strong><small>VIRTUAL</small></div></div>
+        <nav class="ia-nav" aria-label="Navegação principal">
+          ${this._navItem("visao","⌂","Visão Geral")}
+          ${this._navItem("resultados","▥","Resultados")}
+          ${this._navItem("entradas","◎","Entradas")}
+          ${this._navItem("mercados","▣","Mercados")}
+          ${this._navItem("historico","▤","Histórico")}
+          ${this._navItem("lembretes","♧","Lembretes")}
+          ${this._navItem("configuracoes","⚙","Configurações")}
+        </nav>
+        <div class="ia-side-bottom">
+          <div class="ia-online"><span class="ia-dot"></span><div><b>SISTEMA ONLINE</b><small id="ia-sync-status">Dados atualizados</small></div></div>
+          <div class="ia-user"><span>M</span><div><b>Marcelo</b><small>Usuário</small></div><i>›</i></div>
+        </div>
+      </aside>
+      <main class="ia-main">
+        <header class="ia-topbar">
+          <div><h1 id="ia-page-title">VISÃO GERAL</h1><p id="ia-page-subtitle">Acompanhe em tempo real as melhores oportunidades.</p></div>
+          <div class="ia-clock"><span>◷</span><div><b id="ia-clock-time">--:--:--</b><small id="ia-clock-date">--/--/----</small></div><span class="ia-bell">♧<em>1</em></span></div>
+        </header>
+        <section id="ia-content" class="ia-content"></section>
+        <footer>VAI NA FÉ VIRTUAL © 2026 - Todos os direitos reservados</footer>
+      </main>`;
+    document.getElementById("app").appendChild(shell);
+    this._estilosModernos();
+  };
+
+  Interface._navItem = function(id,icon,label){
+    return `<button class="ia-nav-item" data-page="${id}"><span>${icon}</span>${label}</button>`;
+  };
+
+  Interface._eventosModernos = function(){
+    document.querySelectorAll(".ia-nav-item").forEach(btn => btn.addEventListener("click", () => {
+      this._paginaModerna = btn.dataset.page;
+      this._renderModerno();
+      if (window.innerWidth <= 760) document.querySelector(".ia-sidebar")?.classList.remove("aberta");
+    }));
+  };
+
+  Interface._cacheDadosModernos = { chave:"", resultados:[], seq:[], mercados:{}, liberado:false };
+  Interface._dadosModernos = function(){
+    const resultados = (typeof Historico !== "undefined" && Historico.obterTodos) ? Historico.obterTodos() : [];
+    const seq = (typeof Historico !== "undefined" && Historico.obterSequenciaAtual) ? Historico.obterSequenciaAtual() : resultados;
+    const ultimo = resultados.at(-1);
+    // Cache seguro: só reaproveita previsão quando o HISTÓRICO COMPLETO não mudou.
+    // Não limita, corta nem troca a base carregada do Firebase.
+    const chave = `${resultados.length}|${ultimo?.id||""}|${ultimo?._temporal?.data||""}|${ultimo?._temporal?.horario||""}|${ultimo?.placar||""}`;
+    let cache = this._cacheDadosModernos;
+    if (!cache || cache.chave !== chave) {
+      const liberado = seq.length >= 3;
+      let mercados = {};
+      try { mercados = Previsoes.gerar(resultados, seq, {liberarPalpite:liberado}).mercados || {}; } catch(_) {}
+      cache = this._cacheDadosModernos = { chave, resultados, seq, mercados, liberado };
+    }
+    const atual = typeof RelogioPartidas !== "undefined" ? RelogioPartidas.partidaAtual() : null;
+    const proxima = typeof RelogioPartidas !== "undefined" ? RelogioPartidas.proximaPartida() : null;
+    const agora = typeof RelogioPartidas !== "undefined" ? RelogioPartidas.agora() : null;
+    return {resultados:cache.resultados,seq:cache.seq,mercados:cache.mercados,atual,proxima,agora,liberado:cache.liberado};
+  };
+
+  Interface._rotuloMercado = function(k,d){
+    if (!(d?.ativo && d?.palpite)) return AGUARDA;
+    const adapters={exato:window.MercadoPlacarExato,gols:window.MercadoGolsExatos,r12:window.MercadoResultado1X2,bm:window.MercadoAmbosMarcam,ou05:window.MercadoOverUnder05,under05:window.MercadoUnder05,ou15:window.MercadoOverUnder15,ou25:window.MercadoOverUnder25,ou35:window.MercadoOverUnder35,over35:window.MercadoOver35};
+    try { return adapters[k]?.rotulo ? adapters[k].rotulo(d.palpite.valor) : String(d.palpite.valor); } catch(_) { return String(d.palpite.valor); }
+  };
+
+  Interface._estatIndividualUI = function(k, valor){
+    try {
+      if (typeof Aprendizado !== "undefined" && typeof Aprendizado.estatisticaMercado === "function") return Aprendizado.estatisticaMercado(k, valor);
+    } catch(_) {}
+    return {amostra:0,taxa:0,taxaAjustada:50};
+  };
+
+  Interface._cardsMercados = function(m){
+    const defs=[
+      ["ou15","MAIS","Mais de 1.5"],["ou15","MENOS","Menos de 1.5"],
+      ["ou25","MAIS","Mais de 2.5"],["ou25","MENOS","Menos de 2.5"],
+      ["over35","MAIS","Mais de 3.5"],["ou35","MENOS","Menos de 3.5 · fixo"],
+      ["bm","SIM","Ambos Marcam — SIM"],["bm","NÃO","Ambos Marcam — NÃO"],
+      ["r12","1","Mandante vence"],["r12","X","Empate"],["r12","2","Visitante vence"],
+      ["under05","MENOS","Menos de 0.5"]
+    ];
+    const cards=defs.map(([k,valor,nome])=>{
+      const d=m[k]||{};
+      const chamada=Boolean(d?.ativo && d?.palpite && String(d.palpite.valor).toUpperCase()===String(valor).toUpperCase());
+      const conf=chamada ? Number(d?.palpite?.percentual)||0 : 0;
+      const st=this._estatIndividualUI(k,valor);
+      const hist=st.amostra ? `${st.taxa.toFixed(1)}% em ${st.amostra}` : "formando amostra";
+      return `<article class="ia-market-card ${chamada?'ativo':''}"><h3>${esc(nome)}</h3><div class="ia-market-value">${chamada?`CHAMADA · ${pct(conf)}`:'SEM CHAMADA'}</div><div class="ia-meter"><span style="width:${chamada?conf:Math.max(0,Math.min(100,Number(st.taxaAjustada)||0))}%"></span></div><div class="ia-market-foot"><span>Taxa própria</span><b>${esc(hist)}</b></div></article>`;
+    });
+    for (const [k,nome] of [["gols","Total de Gols"],["exato","Placar Exato"]]) {
+      const d=m[k]||{}; const valor=this._rotuloMercado(k,d); const conf=d?.palpite?.percentual;
+      cards.push(`<article class="ia-market-card ${d?.ativo&&d?.palpite?'ativo':''}"><h3>${nome}</h3><div class="ia-market-value">${esc(valor)}</div><div class="ia-meter"><span style="width:${Number(conf)||0}%"></span></div><div class="ia-market-foot"><span>Confiança atual</span><b>${pct(conf)}</b></div></article>`);
+    }
+    return cards.join("");
+  };
+
+  Interface._renderModerno = function(){
+    const content=document.getElementById("ia-content"); if(!content) return;
+    const d=this._dadosModernos();
+    document.querySelectorAll(".ia-nav-item").forEach(b=>b.classList.toggle("ativo",b.dataset.page===this._paginaModerna));
+    this._atualizarRelogioModerno(d);
+    const titles={
+      visao:["VISÃO GERAL","Acompanhe em tempo real as melhores oportunidades."], resultados:["RESULTADOS","Registre e acompanhe os resultados das partidas."],
+      entradas:["ENTRADAS","Partidas selecionadas com base nos padrões históricos."], mercados:["MERCADOS","Análise completa dos mercados disponíveis."],
+      historico:["HISTÓRICO","Consulte os resultados registrados pelo sistema."], lembretes:["LEMBRETES","Apenas o que realmente importa, em tempo real."],
+      configuracoes:["CONFIGURAÇÕES","Personalize sua experiência no Vai na Fé Virtual."]
+    };
+    const [t,s]=titles[this._paginaModerna]||titles.visao;
+    document.getElementById("ia-page-title").textContent=t; document.getElementById("ia-page-subtitle").textContent=s;
+    const fn=this[`_pagina_${this._paginaModerna}`]||this._pagina_visao; content.innerHTML=fn.call(this,d);
+    this._eventosPaginaModerna();
+  };
+
+  Interface._atualizarRelogioModerno = function(d){
+    const a=d.agora; const now=new Date();
+    const time=a?`${String(a.hour).padStart(2,"0")}:${String(a.minute).padStart(2,"0")}:${String(a.second).padStart(2,"0")}`:now.toLocaleTimeString("pt-BR");
+    const date=a?.data||now.toLocaleDateString("pt-BR");
+    const e1=document.getElementById("ia-clock-time"),e2=document.getElementById("ia-clock-date"); if(e1)e1.textContent=time;if(e2)e2.textContent=date;
+  };
+
+  Interface._pagina_visao = function(d){
+    const prox=d.proxima?.horario||"--:--";
+    const ativos=Object.entries(d.mercados).filter(([,x])=>x?.ativo&&x?.palpite).sort((a,b)=>(b[1].palpite.percentual||0)-(a[1].palpite.percentual||0));
+    const melhor=ativos[0];
+    const ult=(d.seq||[]).slice(-10).reverse();
+    return `<div class="ia-grid-home">
+      <section class="ia-card ia-next"><div class="ia-card-title">PRÓXIMO JOGO <span class="ia-chip">AO VIVO</span></div><div class="ia-next-body"><div class="ia-count"><small>HORÁRIO</small><b>${prox}</b></div><div class="ia-match-empty"><span>⚽</span><strong>${AGUARDA}</strong><small>Equipes da partida</small></div></div></section>
+      <section class="ia-card ia-confidence"><div>CONFIANÇA GERAL</div><div class="ia-ring"><b>${melhor?pct(melhor[1].palpite.percentual):"—"}</b></div><strong>${melhor?"Melhor leitura disponível":AGUARDA}</strong></section>
+      <section class="ia-card ia-wide"><div class="ia-section-head"><h2>PRINCIPAIS MERCADOS</h2><button data-go="mercados">Ver todos os mercados ›</button></div><div class="ia-market-strip">${this._cardsMercados(d.mercados)}</div></section>
+      <section class="ia-card ia-wide"><div class="ia-section-head"><h2>MELHORES OPORTUNIDADES DO MOMENTO</h2></div>${ativos.length?`<div class="ia-table">${ativos.slice(0,5).map(([k,x],i)=>`<div class="ia-row"><span class="ia-rank">${i+1}</span><strong>${esc(this._rotuloMercado(k,x))}</strong><span>Confiança <b>${pct(x.palpite.percentual)}</b></span><span class="ia-tag ${x.palpite.percentual>=70?'ok':'warn'}">${x.palpite.percentual>=70?'CONSIDERAR':'ACOMPANHAR'}</span></div>`).join("")}</div>`:`<div class="ia-await">${AGUARDA}</div>`}</section>
+      <section class="ia-card"><h2>SEQUÊNCIA RECENTE</h2>${ult.length?`<div class="ia-score-list">${ult.map(x=>`<span>${esc(x.placar||"—")}</span>`).join("")}</div><p class="ia-muted">${d.seq.length} resultados na sequência atual.</p>`:`<div class="ia-await">${AGUARDA}</div>`}</section>
+      <section class="ia-card"><h2>DESEMPENHO GERAL</h2><div class="ia-stat-big">${d.resultados.length}</div><p class="ia-muted">Resultados disponíveis no histórico.</p></section>
+      <section class="ia-card"><h2>EVOLUÇÃO DA CONFIANÇA</h2><div class="ia-chart-placeholder"><span>${AGUARDA}</span></div></section>
+      <section class="ia-card ia-wide ia-tip"><b>◉ DICA DO MOMENTO</b><p>${melhor?`${esc(this._rotuloMercado(melhor[0],melhor[1]))} é a leitura de maior confiança neste momento (${pct(melhor[1].palpite.percentual)}).`:AGUARDA}</p></section>
+    </div>`;
+  };
+
+  Interface._pagina_resultados = function(d){
+    const ult=d.resultados.slice(-20).reverse();
+    return `<div class="ia-two"><section class="ia-card"><h2>REGISTRAR RESULTADO</h2><p class="ia-muted">Partida a registrar: <b>${d.atual?.horario||"--:--"}</b></p><div class="ia-score-buttons">${['0x0','1x0','0x1','1x1','2x0','0x2','2x1','1x2','2x2','3x0','0x3','3x1','1x3','3x2','2x3','3x3','4x0','0x4'].map(v=>`<button data-score="${v}">${v}</button>`).join("")}</div><div class="ia-custom-score"><input id="ia-custom-score" placeholder="Ex.: 5x2" inputmode="numeric"><button id="ia-register-custom">Registrar</button></div><p class="ia-note">A lógica de bloqueio por horário continua sendo a mesma do sistema atual.</p></section>
+    <section class="ia-card"><h2>ÚLTIMOS RESULTADOS</h2>${ult.length?`<div class="ia-history">${ult.map(x=>`<div><span>${esc(x?._temporal?.horario||"--:--")}</span><b>${esc(x.placar||"—")}</b><small>${esc(x?._temporal?.data||"")}</small></div>`).join("")}</div>`:`<div class="ia-await">${AGUARDA}</div>`}</section></div>`;
+  };
+
+  Interface._pagina_entradas = function(d){
+    const ativos=Object.entries(d.mercados).filter(([,x])=>x?.ativo&&x?.palpite).sort((a,b)=>(b[1].palpite.percentual||0)-(a[1].palpite.percentual||0));
+    return `<div class="ia-two ia-entries"><section class="ia-card"><h2>PARTIDAS SELECIONADAS</h2><p class="ia-muted">Jogos em ordem de horário. Informações de equipes ainda não existem nesta base.</p><div class="ia-empty-table"><div class="ia-row"><span>#</span><span>Horário</span><span>Partida</span><span>Sugeriu</span></div><div class="ia-row"><span>1</span><b>${d.proxima?.horario||"--:--"}</b><strong>${AGUARDA}</strong><span>${ativos.length?`${Math.min(3,ativos.length)} entradas`:AGUARDA}</span></div></div></section>
+    <section class="ia-card"><h2>DETALHES DA PARTIDA</h2><div class="ia-match-config">⚽<strong>${AGUARDA}</strong><small>Equipes, escudos e confronto direto</small></div><div class="ia-info-cards"><div><small>Horário do jogo</small><b>${d.proxima?.horario||"--:--"}</b></div><div><small>Confiança da IA</small><b>${ativos[0]?pct(ativos[0][1].palpite.percentual):"—"}</b></div><div><small>Sugeriu</small><b>${ativos.length?Math.min(3,ativos.length):"—"}</b></div></div><h2>SUGESTÕES DE ENTRADA PARA ESTE JOGO</h2>${ativos.length?`<div class="ia-table">${ativos.slice(0,3).map(([k,x],i)=>`<div class="ia-row"><span>${i+1}</span><strong>${esc(this._rotuloMercado(k,x))}</strong><span>${AGUARDA}</span><b>${pct(x.palpite.percentual)}</b></div>`).join("")}</div>`:`<div class="ia-await">${AGUARDA}</div>`}<div class="ia-analysis"><b>▤ ANÁLISE DA IA</b><p>${AGUARDA}</p></div></section></div>`;
+  };
+
+  Interface._pagina_mercados = function(d){
+    return `<div class="ia-two ia-markets-page"><section><div class="ia-card ia-selected"><span class="ia-chip">PARTIDA SELECIONADA</span><div><b>⚽ Inglês Doméstico (Esportes Virtuais)</b><strong>${AGUARDA}</strong><time>${d.proxima?.horario||"--:--"}</time></div></div><div class="ia-market-grid">${this._cardsMercados(d.mercados)}</div></section><aside><section class="ia-card"><h2>DETALHES DA PARTIDA</h2><div class="ia-match-config">⚽<strong>${AGUARDA}</strong><small>Equipes e dados da partida</small></div></section><section class="ia-card ia-analysis"><b>▤ ANÁLISE DA IA</b><p>Os lados são independentes: Mais de 1.5 não compartilha taxa com Menos de 1.5; SIM/NÃO e Casa/Empate/Fora também possuem memória própria.</p></section><section class="ia-card"><h2>RESUMO DOS MERCADOS</h2>${this._resumoMercados(d.mercados)}</section></aside></div>`;
+  };
+
+  Interface._resumoMercados = function(m){
+    const xs=Object.entries(m).filter(([,x])=>x?.ativo&&x?.palpite).sort((a,b)=>(b[1].palpite.percentual||0)-(a[1].palpite.percentual||0)).slice(0,6);
+    if(!xs.length)return `<div class="ia-await">${AGUARDA}</div>`;
+    return `<div class="ia-table">${xs.map(([k,x])=>`<div class="ia-row"><strong>${esc(this._rotuloMercado(k,x))}</strong><span>${pct(x.palpite.percentual)}</span><span class="ia-tag ${x.palpite.percentual>=70?'ok':'warn'}">${x.palpite.percentual>=70?'SUGERIDO':'OBSERVAR'}</span></div>`).join("")}</div>`;
+  };
+
+  Interface._pagina_historico = function(d){
+    const xs=d.resultados.slice().reverse().slice(0,100);
+    return `<section class="ia-card"><div class="ia-section-head"><h2>HISTÓRICO DE RESULTADOS</h2><span>${d.resultados.length} registros</span></div>${xs.length?`<div class="ia-history ia-history-full">${xs.map((x,i)=>`<div><span>${d.resultados.length-i}</span><b>${esc(x.placar||"—")}</b><span>${esc(x?._temporal?.horario||"--:--")}</span><small>${esc(x?._temporal?.data||"")}</small></div>`).join("")}</div>`:`<div class="ia-await">${AGUARDA}</div>`}</section>`;
+  };
+
+  Interface._pagina_lembretes = function(d){
+    return `<div class="ia-reminders"><div class="ia-filter-row"><button class="ativo">♧ Todos</button><button>▥ Entradas</button><button>⚽ Partidas</button><button class="outline" data-go="configuracoes">⚙ Configurar lembretes</button></div><section class="ia-card"><div class="ia-reminder"><time>${d.proxima?.horario||"--:--"}</time><span>⚽</span><div><b>Próxima partida</b><small>${AGUARDA}</small></div><em>PARTIDA</em></div>${Object.entries(d.mercados).filter(([,x])=>x?.ativo&&x?.palpite).slice(0,2).map(([k,x])=>`<div class="ia-reminder"><time>Agora</time><span>▥</span><div><b>${esc(this._rotuloMercado(k,x))} com ${pct(x.palpite.percentual)}</b><small>Sequência relevante detectada</small></div><em>ENTRADA</em></div>`).join("")}<div class="ia-reminder"><time>—</time><span>ⓘ</span><div><b>Dados adicionais</b><small>${AGUARDA}</small></div><em>SISTEMA</em></div></section><div class="ia-analysis"><b>ⓘ</b> Os lembretes exibem somente informações que o sistema já consegue confirmar.</div></div>`;
+  };
+
+  Interface._pagina_configuracoes = function(d){
+    return `<div class="ia-settings"><section class="ia-setting"><div><span>●</span><div><h2>Aparência</h2><p>Escolha o tema e a aparência do sistema.</p></div></div><div class="ia-segment"><button class="ativo">Escuro</button><button disabled>Claro</button><button disabled>Automático</button></div></section><section class="ia-setting"><div><span>♧</span><div><h2>Notificações</h2><p>Escolha como e quando deseja ser notificado.</p></div></div><div class="ia-config-wait">${AGUARDA}</div></section><section class="ia-setting"><div><span>☷</span><div><h2>Tipos de lembrete</h2><p>Selecione os avisos que deseja receber.</p></div></div><div class="ia-config-wait">${AGUARDA}</div></section><section class="ia-setting"><div><span>▣</span><div><h2>Exibição</h2><p>Ajuste como as informações são mostradas.</p></div></div><div><label>Resultados recentes na Home <select id="ia-home-count"><option>10</option><option>5</option><option>20</option></select></label><label>Exibir porcentagens <input type="checkbox" checked disabled></label></div></section><section class="ia-setting"><div><span>◉</span><div><h2>Dados e Desempenho</h2><p>Gerencie os dados locais do aplicativo.</p></div></div><div><button id="ia-save-data" class="ia-outline-btn">Salvar backup</button><button id="ia-load-data" class="ia-outline-btn">Carregar backup</button></div></section><section class="ia-setting"><div><span>ⓘ</span><div><h2>Sobre</h2><p>Informações do sistema.</p></div></div><div><label>Versão do sistema <b>Atual</b></label><label>Última atualização <b>04/09/2026</b></label></div></section></div>`;
+  };
+
+  Interface._eventosPaginaModerna = function(){
+    document.querySelectorAll("[data-go]").forEach(b=>b.onclick=()=>{this._paginaModerna=b.dataset.go;this._renderModerno();});
+    document.querySelectorAll("[data-score]").forEach(b=>b.onclick=()=>this.registrarRapido(b.dataset.score));
+    const custom=document.getElementById("ia-register-custom"); if(custom) custom.onclick=()=>this.registrarRapido(document.getElementById("ia-custom-score")?.value||"");
+    const save=document.getElementById("ia-save-data"); if(save) save.onclick=()=>document.getElementById("btn-salvar")?.click();
+    const load=document.getElementById("ia-load-data"); if(load) load.onclick=()=>document.getElementById("btn-carregar")?.click();
+  };
+
+  Interface._estilosModernos = function(){
+    if(document.getElementById("ia-modern-css"))return;
+    const st=document.createElement("style");st.id="ia-modern-css";st.textContent=`
+:root{--bg:#030815;--panel:#061020;--panel2:#091426;--line:#112846;--text:#f7f8ff;--muted:#aeb9d2;--purple:#7a00ff;--magenta:#e500ff;--cyan:#00c8ff;--green:#00e884;--yellow:#ffc400;--red:#ff324c}
+html,body{min-height:100%;background:#020611!important}.ia-legado{display:none!important}body{padding:0!important;margin:0!important;color:var(--text)!important;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif!important}.ia-shell{min-height:100vh;display:grid;grid-template-columns:225px 1fr;background:radial-gradient(circle at 70% 0%,#071731 0,#030916 34%,#020611 70%);color:var(--text)}
+.ia-sidebar{position:sticky;top:0;height:100vh;border-right:1px solid #10243d;background:linear-gradient(180deg,#030713,#020611);padding:20px 16px;display:flex;flex-direction:column;z-index:4}.ia-brand{display:flex;align-items:center;gap:10px;font-size:20px;margin:2px 4px 24px}.ia-logo{width:44px;height:44px;display:grid;place-items:center;font-size:36px;color:var(--magenta);filter:drop-shadow(0 0 10px #b000ff)}.ia-brand-text{display:flex;flex-direction:column;line-height:1.05}.ia-brand-text strong{font-size:20px;letter-spacing:.02em}.ia-brand-text small{font-size:11px;letter-spacing:.24em;color:#bda8ff;margin-top:4px;font-weight:700}.ia-nav{display:flex;flex-direction:column;gap:7px}.ia-nav-item{border:0;background:transparent;color:#e9ecf6;text-align:left;padding:13px 14px;border-radius:7px;font-size:15px;display:flex;align-items:center;gap:14px;cursor:pointer}.ia-nav-item span{font-size:22px;width:25px}.ia-nav-item:hover,.ia-nav-item.ativo{background:linear-gradient(90deg,#4d00bf,#5f08c8 60%,#3c087f);box-shadow:inset 0 0 0 1px #7d19ea}.ia-side-bottom{margin-top:auto;display:grid;gap:12px}.ia-online,.ia-user{border:1px solid #10303a;border-radius:8px;padding:13px;display:flex;align-items:center;gap:10px;background:#031117}.ia-online .ia-dot{width:13px;height:13px;border-radius:50%;background:#00e89b;box-shadow:0 0 14px #00e89b}.ia-online b{color:#00e89b}.ia-online small,.ia-user small{display:block;color:#d6dced;margin-top:6px}.ia-user{border-color:#121c36;background:#030713}.ia-user>span{width:42px;height:42px;border-radius:50%;display:grid;place-items:center;background:linear-gradient(135deg,#270065,#6d00d9);border:1px solid #8d22ff;font-size:20px}.ia-user i{margin-left:auto;font-size:28px}
+.ia-main{min-width:0}.ia-topbar{height:82px;border-bottom:1px solid #10223a;display:flex;justify-content:space-between;align-items:center;padding:13px 28px;background:linear-gradient(180deg,rgba(5,15,31,.78),rgba(3,9,22,.4));position:sticky;top:0;z-index:3;backdrop-filter:blur(12px)}.ia-topbar h1{font-size:28px!important;margin:0!important;letter-spacing:.01em}.ia-topbar p{margin:4px 0 0!important;color:#d2d9e9}.ia-clock{display:flex;align-items:center;gap:11px;font-size:25px}.ia-clock div{display:flex;flex-direction:column}.ia-clock b{font-size:18px}.ia-clock small{font-size:12px;color:#dce3f4}.ia-bell{position:relative;margin-left:24px}.ia-bell em{position:absolute;right:-5px;top:-4px;width:14px;height:14px;border-radius:50%;background:red;font-size:9px;display:grid;place-items:center;font-style:normal}.ia-content{padding:14px;max-width:1500px;margin:0 auto}.ia-main footer{text-align:center;color:#f000ff;padding:20px;border-top:1px solid #10223a;margin-top:14px}
+.ia-card{background:linear-gradient(145deg,rgba(7,17,34,.96),rgba(4,10,23,.97));border:1px solid #152945;border-radius:10px;padding:16px;box-shadow:inset 0 1px rgba(255,255,255,.02)}.ia-card h2{font-size:16px;margin:0 0 12px}.ia-grid-home{display:grid;grid-template-columns:1.25fr .85fr .72fr;gap:14px}.ia-next{grid-column:span 2}.ia-wide{grid-column:1/-1}.ia-card-title{font-weight:800}.ia-chip{font-size:11px;padding:5px 8px;border-radius:5px;background:#3f1479;color:#d8c2ff;margin-left:8px}.ia-next-body{display:grid;grid-template-columns:130px 1fr;gap:20px;align-items:center;margin-top:12px}.ia-count{border:1px solid #1a2744;border-radius:9px;padding:20px;text-align:center}.ia-count small{display:block;color:#c9d1e3}.ia-count b{font-size:30px}.ia-match-empty,.ia-match-config{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:7px;min-height:115px;text-align:center}.ia-match-empty span,.ia-match-config:first-letter{color:var(--magenta)}.ia-match-empty strong,.ia-match-config strong{color:#caa9ff}.ia-match-empty small,.ia-match-config small,.ia-muted{color:var(--muted)}.ia-confidence{text-align:center}.ia-ring{width:110px;height:110px;margin:12px auto;border-radius:50%;display:grid;place-items:center;background:conic-gradient(#21e382 0 38%,#8227ff 38% 70%,#142035 70%);position:relative}.ia-ring:after{content:"";position:absolute;inset:10px;background:#07101f;border-radius:50%}.ia-ring b{z-index:1;font-size:28px}.ia-confidence>strong{color:var(--green)}.ia-section-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}.ia-section-head h2{margin:0}.ia-section-head button,.ia-section-head span{border:0;background:none;color:#e65cff;cursor:pointer}.ia-market-strip,.ia-market-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px}.ia-market-grid{grid-template-columns:repeat(3,minmax(0,1fr));margin-top:12px}.ia-market-card{border:1px solid #26314c;background:#070d1a;border-radius:9px;padding:13px;min-width:0}.ia-market-card.ativo{border-color:#2c6f48}.ia-market-card h3{font-size:14px;margin:0 0 12px;color:#f1f3fa}.ia-market-value{font-size:22px;font-weight:800;color:#95a5c4;min-height:52px;overflow-wrap:anywhere}.ia-market-card.ativo .ia-market-value{color:#65ee67}.ia-meter{height:7px;background:#122039;border-radius:999px;overflow:hidden;margin:8px 0}.ia-meter span{height:100%;display:block;background:linear-gradient(90deg,#68de79,#00df91);border-radius:999px}.ia-market-foot{display:flex;justify-content:space-between;color:#8997b2;font-size:11px}.ia-market-foot b{color:#dbe4f7}.ia-table{display:grid}.ia-row{display:grid;grid-template-columns:42px minmax(150px,1.5fr) minmax(140px,1fr) 120px;gap:12px;align-items:center;padding:11px 8px;border-bottom:1px solid #142238}.ia-rank{width:27px;height:27px;border-radius:50%;border:1px solid #8ca91d;display:grid;place-items:center;color:#d9ff33}.ia-tag{padding:7px 10px;text-align:center;border-radius:5px;border:1px solid}.ia-tag.ok{color:var(--green);border-color:#087642;background:#062b1c}.ia-tag.warn{color:var(--yellow);border-color:#6c5600;background:#2a2203}.ia-score-list{display:flex;flex-wrap:wrap;gap:7px}.ia-score-list span{padding:8px;border-radius:5px;background:#082213;color:#73ff6f;border:1px solid #174a28;font-weight:800}.ia-stat-big{font-size:42px;font-weight:800;color:#b875ff}.ia-chart-placeholder{height:140px;display:grid;place-items:center;color:#9776b9;background:linear-gradient(180deg,rgba(126,19,223,.12),transparent);border-bottom:1px solid #532175}.ia-tip{border-color:#7c22bd;background:linear-gradient(90deg,#17072b,#0b071d)}.ia-tip b{color:#e59cff}.ia-await,.ia-config-wait{padding:24px;text-align:center;color:#9c8bb9;border:1px dashed #3e285e;border-radius:8px;background:#090818}
+.ia-two{display:grid;grid-template-columns:1fr 1fr;gap:12px}.ia-score-buttons{display:grid;grid-template-columns:repeat(6,1fr);gap:7px}.ia-score-buttons button,.ia-custom-score button,.ia-filter-row button,.ia-outline-btn{border:1px solid #3e2764;background:#12062e;color:#eee;border-radius:6px;padding:10px;cursor:pointer}.ia-score-buttons button:hover{border-color:#a725ff;background:#2a075d}.ia-custom-score{display:flex;gap:8px;margin-top:12px}.ia-custom-score input{flex:1;background:#06101f;color:white;border:1px solid #1a3557;border-radius:6px;padding:11px}.ia-note{color:#95a2bb;font-size:12px}.ia-history{display:grid;gap:4px;max-height:630px;overflow:auto}.ia-history>div{display:grid;grid-template-columns:85px 1fr 100px;gap:10px;padding:9px 10px;border-bottom:1px solid #122238;align-items:center}.ia-history b{color:#78f083;font-size:17px}.ia-history small{color:#8794ac}.ia-history-full>div{grid-template-columns:60px 100px 110px 1fr}.ia-empty-table .ia-row{grid-template-columns:50px 90px 1fr 120px}.ia-entries>section:nth-child(2){min-height:650px}.ia-info-cards{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:8px 0 18px}.ia-info-cards>div{border:1px solid #172945;border-radius:8px;padding:12px;text-align:center}.ia-info-cards small{display:block;color:#9da9c2}.ia-info-cards b{font-size:20px}.ia-analysis{border:1px solid #642297!important;background:linear-gradient(100deg,#1b0737,#100923)!important;border-radius:9px;padding:14px;color:#d9c8f2}.ia-analysis b{color:#ec46ff}.ia-analysis p{line-height:1.6}.ia-markets-page{grid-template-columns:1.8fr 1fr}.ia-markets-page aside{display:grid;align-content:start;gap:10px}.ia-selected>div{display:grid;grid-template-columns:1fr 2fr 100px;gap:12px;align-items:center;margin-top:10px}.ia-selected strong{color:#a995c9}.ia-selected time{text-align:center;font-size:20px}.ia-reminders{display:grid;gap:16px}.ia-filter-row{display:flex;gap:12px}.ia-filter-row button{min-width:160px;font-size:15px}.ia-filter-row button.ativo{background:linear-gradient(135deg,#3b05a8,#6613e5);border-color:#7f23ff}.ia-filter-row .outline{margin-left:auto;background:transparent;border-color:#b918ff}.ia-reminder{display:grid;grid-template-columns:100px 54px 1fr 110px;gap:14px;align-items:center;padding:17px;border-bottom:1px solid #193250}.ia-reminder time{font-size:20px;font-weight:800}.ia-reminder>span{font-size:30px;color:#aa45ff}.ia-reminder div{display:flex;flex-direction:column;gap:4px}.ia-reminder small{color:#afbdd5}.ia-reminder em{font-style:normal;border:1px solid #593ab8;border-radius:5px;padding:8px;text-align:center;color:#c9afff;background:#17103a}.ia-settings{display:grid;gap:12px}.ia-setting{border:1px solid #143051;background:linear-gradient(110deg,#061324,#06101d);border-radius:10px;padding:18px;display:grid;grid-template-columns:1fr 1fr;gap:20px;align-items:center}.ia-setting>div:first-child{display:flex;gap:18px;align-items:flex-start}.ia-setting>div:first-child>span{font-size:30px;color:#b883ff}.ia-setting h2{margin:0 0 4px}.ia-setting p{color:#b5bfd2;margin:0}.ia-setting>div:last-child{display:grid;gap:8px}.ia-setting label{display:flex;justify-content:space-between;gap:20px;border-bottom:1px solid #11243d;padding:8px}.ia-setting select{background:#061326;color:white;border:1px solid #16528c;border-radius:5px;padding:7px}.ia-segment{display:grid!important;grid-template-columns:repeat(3,1fr)}.ia-segment button{padding:12px;background:#071322;border:1px solid #16416b;color:#eee}.ia-segment .ativo{background:linear-gradient(135deg,#4b06c3,#6f0de6)}.ia-outline-btn{border-color:#b417ef;background:transparent}
+@media(max-width:1100px){.ia-shell{grid-template-columns:190px 1fr}.ia-market-strip{grid-template-columns:repeat(3,1fr)}.ia-market-grid{grid-template-columns:repeat(2,1fr)}.ia-grid-home{grid-template-columns:1fr 1fr}.ia-next{grid-column:auto}.ia-confidence{grid-column:auto}}
+@media(max-width:760px){.ia-topbar{backdrop-filter:none!important;-webkit-backdrop-filter:none!important}.ia-shell{display:block}.ia-sidebar{position:relative;width:100%;height:auto;padding:10px}.ia-brand{margin:0 0 8px}.ia-nav{display:grid;grid-template-columns:repeat(4,1fr);gap:5px}.ia-nav-item{padding:9px 6px;font-size:11px;justify-content:center;flex-direction:column;gap:3px;text-align:center}.ia-nav-item span{font-size:18px;width:auto}.ia-side-bottom{display:none}.ia-topbar{position:relative;height:auto;padding:14px}.ia-topbar h1{font-size:22px!important}.ia-topbar p{font-size:12px}.ia-clock{font-size:18px}.ia-clock b{font-size:14px}.ia-bell{display:none}.ia-content{padding:8px}.ia-grid-home,.ia-two,.ia-markets-page{grid-template-columns:1fr}.ia-next,.ia-wide{grid-column:auto}.ia-market-strip,.ia-market-grid{grid-template-columns:repeat(2,1fr)}.ia-row{grid-template-columns:32px 1fr!important;gap:5px}.ia-row>*:nth-child(n+3){grid-column:2}.ia-score-buttons{grid-template-columns:repeat(4,1fr)}.ia-selected>div{grid-template-columns:1fr}.ia-filter-row{display:grid;grid-template-columns:1fr 1fr}.ia-filter-row button{min-width:0}.ia-filter-row .outline{margin-left:0}.ia-reminder{grid-template-columns:70px 36px 1fr}.ia-reminder em{grid-column:3}.ia-setting{grid-template-columns:1fr}.ia-market-value{font-size:17px}.ia-next-body{grid-template-columns:1fr}.ia-history>div,.ia-history-full>div{grid-template-columns:70px 1fr}.ia-history small{grid-column:2}.ia-main footer{font-size:11px}}
+`;
+    document.head.appendChild(st);
+  };
+})();
+"use strict";
+
+/*
+ * CAMADA DE TESTE — PRÓXIMAS PARTIDAS NO MESMO FIREBASE
+ *
+ * O núcleo continua usando:
+ *   /historico_compartilhado  -> somente resultados finalizados
+ *   /memoria_mercados_v1      -> memória dos mercados
+ *
+ * Esta camada de teste lê, no MESMO Realtime Database:
+ *   /proximas_partidas        -> agenda/equipes ainda sem resultado
+ *
+ * Nenhum dado de /proximas_partidas é enviado ao histórico como resultado.
+ */
+const TesteProximasPartidas = {
+  CHAVE_CONFIG: "vai_na_fe_proximas_partidas_teste_v2",
+  CHAVE_AGENDA_CACHE: "vai_na_fe_agenda_coletor_base_zerada_v1",
+  PADRAO: { caminhoPartidas: "proximas_partidas" },
+  TIMEOUT_MS: 4500,
+  INTERVALO_MS: 2500,
+  _partidas: new Map(),
+  _partidasRemotas: new Map(),
+  _status: "aguardando",
+  _erro: "",
+  _carregando: false,
+  _timer: null,
+  _assinaturaDados: "",
+  _ultimaAtualizacaoRemota: 0,
+
+  firebasePrincipal() {
+    return (typeof Sincronizacao !== "undefined" && Sincronizacao.DATABASE_URL)
+      ? String(Sincronizacao.DATABASE_URL).replace(/\/$/, "")
+      : "";
+  },
+
+  config() {
+    try {
+      const salvo = JSON.parse(localStorage.getItem(this.CHAVE_CONFIG) || "null");
+      return { ...this.PADRAO, ...(salvo || {}) };
+    } catch (_) {
+      return { ...this.PADRAO };
+    }
+  },
+
+  salvarCaminho(caminhoPartidas) {
+    const caminho = String(caminhoPartidas || this.PADRAO.caminhoPartidas)
+      .trim().replace(/^\/+|\/+$/g, "") || this.PADRAO.caminhoPartidas;
+    localStorage.setItem(this.CHAVE_CONFIG, JSON.stringify({ caminhoPartidas: caminho }));
+    this._partidas.clear();
+    this._status = "aguardando";
+    this._erro = "";
+    this.carregarAgora();
+    return true;
+  },
+
+  configurada() {
+    return /^https:\/\/[^\s]+$/.test(this.firebasePrincipal()) && Boolean(this.config().caminhoPartidas);
+  },
+
+  status() {
+    return {
+      estado: this._status,
+      erro: this._erro,
+      configurada: this.configurada(),
+      quantidade: this._partidas.size,
+      caminho: this.config().caminhoPartidas
+    };
+  },
+
+  _emitir() {
+    window.dispatchEvent(new CustomEvent("vai-na-fe:proximas-partidas-atualizada"));
+  },
+
+  async _fetchJSON(url) {
+    const ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
+    const timer = ctrl ? setTimeout(() => ctrl.abort(), this.TIMEOUT_MS) : null;
+    try {
+      const r = await fetch(url, { cache: "no-store", ...(ctrl ? { signal: ctrl.signal } : {}) });
+      if (!r.ok) throw new Error(`Firebase HTTP ${r.status}`);
+      return await r.json();
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  },
+
+  _url() {
+    const base = this.firebasePrincipal();
+    const path = this.config().caminhoPartidas;
+    return `${base}/${path}.json`;
+  },
+
+  _primeiro(obj, chaves, fallback = "") {
+    for (const k of chaves) {
+      const v = obj?.[k];
+      if (v !== undefined && v !== null && String(v).trim() !== "") return v;
+    }
+    return fallback;
+  },
+
+  _valorCaminho(obj, caminhos, fallback = "") {
+    for (const caminho of caminhos) {
+      let atual = obj;
+      for (const parte of caminho.split(".")) atual = atual?.[parte];
+      if (atual !== undefined && atual !== null && String(atual).trim() !== "") return atual;
+    }
+    return fallback;
+  },
+
+  _nomeTime(raw, lado) {
+    const casa = lado === "casa";
+    const simples = casa
+      ? ["mandante", "casa", "home", "timeCasa", "homeTeam", "equipeCasa", "teamHome"]
+      : ["visitante", "fora", "away", "timeFora", "awayTeam", "equipeFora", "teamAway"];
+    const v = this._primeiro(raw, simples, "");
+    if (v && typeof v !== "object") return String(v);
+    const caminhos = casa
+      ? ["mandante.nome", "casa.nome", "home.name", "home.nome", "homeTeam.name", "timeCasa.nome", "teams.home.name"]
+      : ["visitante.nome", "fora.nome", "away.name", "away.nome", "awayTeam.name", "timeFora.nome", "teams.away.name"];
+    return String(this._valorCaminho(raw, caminhos, ""));
+  },
+
+  _logoTime(raw, lado) {
+    const casa = lado === "casa";
+    const simples = casa
+      ? ["escudoMandante", "escudoCasa", "homeLogo", "logoHome", "logoCasa"]
+      : ["escudoVisitante", "escudoFora", "awayLogo", "logoAway", "logoFora"];
+    const v = this._primeiro(raw, simples, "");
+    if (v && typeof v !== "object") return String(v);
+    const caminhos = casa
+      ? ["mandante.logo", "casa.logo", "home.logo", "homeTeam.logo", "timeCasa.logo", "teams.home.logo"]
+      : ["visitante.logo", "fora.logo", "away.logo", "awayTeam.logo", "timeFora.logo", "teams.away.logo"];
+    return String(this._valorCaminho(raw, caminhos, ""));
+  },
+
+  _normalizarSugestoes(raw) {
+    const lista = Array.isArray(raw) ? raw : (raw && typeof raw === "object" ? Object.values(raw) : []);
+    return lista.map((x, i) => ({
+      mercado: String(this._primeiro(x, ["mercado", "nome", "pick", "titulo"], `Entrada ${i + 1}`)),
+      mercadoCompleto: String(this._primeiro(x, ["mercadoCompleto", "mercado_completo", "nomeMercado", "nome_mercado"], "")),
+      rotuloCompleto: String(this._primeiro(x, ["rotuloCompleto", "rotulo_completo", "label"], "")),
+      descricao: String(this._primeiro(x, ["descricao", "detalhe", "subtitulo", "motivo"], "")),
+      confianca: Number(this._primeiro(x, ["confianca", "probabilidade", "percentual", "prob"], NaN)),
+      principal: Boolean(this._primeiro(x, ["principal", "destaque"], i === 0))
+    })).slice(0, 6);
+  },
+
+  _normalizarConfrontos(raw) {
+    const lista = Array.isArray(raw) ? raw : (raw && typeof raw === "object" ? Object.values(raw) : []);
+    return lista.map(x => ({
+      data: String(this._primeiro(x, ["data", "date"], "")),
+      placar: String(this._primeiro(x, ["placar", "score", "resultado"], "")),
+      vencedor: String(this._primeiro(x, ["vencedor", "winner"], ""))
+    })).filter(x => x.data || x.placar || x.vencedor).slice(0, 5);
+  },
+
+  _parecePartida(raw, chave = "") {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return false;
+    const campos = [
+      "horario", "hora", "kickoff", "mandante", "casa", "home", "timeCasa", "homeTeam",
+      "visitante", "fora", "away", "timeFora", "awayTeam", "liga", "campeonato", "status"
+    ];
+    return campos.some(k => raw[k] !== undefined) || /(?:^|_)(?:[01]\d|2[0-3])[-:][0-5]\d(?:$|_)/.test(String(chave));
+  },
+
+  _normalizarPartida(raw, chave = "", dataBase = "") {
+    if (!raw || typeof raw !== "object") return null;
+
+    let horario = String(this._primeiro(raw, ["horario", "hora", "kickoff", "inicio", "time"], ""));
+    if (!/^\d{2}:\d{2}$/.test(horario)) {
+      const achou = String(chave).match(/(?:^|_)((?:[01]\d|2[0-3]))[-:]([0-5]\d)(?:$|_)/);
+      if (achou) horario = `${achou[1]}:${achou[2]}`;
+    }
+    if (!/^\d{2}:\d{2}$/.test(horario)) return null;
+
+    let data = String(this._primeiro(raw, ["data", "dataPartida", "date", "dia"], dataBase));
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(data)) {
+      const achouData = String(chave).match(/(20\d{2}-\d{2}-\d{2})/);
+      if (achouData) data = achouData[1];
+    }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(data) && typeof RelogioPartidas !== "undefined") {
+      try { data = RelogioPartidas.agora().data; } catch (_) {}
+    }
+
+    const status = String(this._primeiro(raw, ["status", "situacao", "estado"], "agendada")).trim().toLowerCase();
+    const mandante = this._nomeTime(raw, "casa");
+    const visitante = this._nomeTime(raw, "fora");
+
+    return {
+      id: String(this._primeiro(raw, ["id", "fixtureId", "partidaId", "gameId"], chave || `${data}|${horario}`)),
+      data,
+      horario,
+      status,
+      ordem: Number.isFinite(Number(this._primeiro(raw, ["ordem", "order", "posicao", "position"], NaN)))
+        ? Number(this._primeiro(raw, ["ordem", "order", "posicao", "position"], NaN))
+        : null,
+      liga: String(this._primeiro(raw, ["liga", "campeonato", "competicao", "competition", "league"], "Inglês Doméstico (Esportes Virtuais)")),
+      mandante,
+      visitante,
+      escudoMandante: this._logoTime(raw, "casa"),
+      escudoVisitante: this._logoTime(raw, "fora"),
+      analise: String(this._primeiro(raw, ["analise", "analysis", "resumo"], "")),
+      sugestoes: this._normalizarSugestoes(this._primeiro(raw, ["sugestoes", "entradas", "picks"], [])),
+      confrontoDireto: this._normalizarConfrontos(this._primeiro(raw, ["confrontoDireto", "h2h", "confrontos"], [])),
+      _origem: "proximas_partidas"
+    };
+  },
+
+  _lerAgendaCache() {
+    try {
+      const raw = JSON.parse(localStorage.getItem(this.CHAVE_AGENDA_CACHE) || "{}");
+      if (!raw || typeof raw !== "object") return new Map();
+      const mapa = new Map();
+      for (const [chave, p] of Object.entries(raw)) {
+        if (!p || typeof p !== "object" || !p.data || !p.horario) continue;
+        mapa.set(chave, p);
+      }
+      return mapa;
+    } catch (_) {
+      return new Map();
+    }
+  },
+
+  _salvarAgendaCache(mapa) {
+    try {
+      const itens = [...mapa.entries()]
+        .filter(([, p]) => p && p.data && p.horario)
+        .sort((a, b) => a[0].localeCompare(b[0]))
+        .slice(-500);
+      localStorage.setItem(this.CHAVE_AGENDA_CACHE, JSON.stringify(Object.fromEntries(itens)));
+    } catch (_) {}
+  },
+
+  _absorver(bruto) {
+    const novo = new Map();
+    const visitar = (valor, chave = "", dataBase = "", profundidade = 0) => {
+      if (!valor || profundidade > 6) return;
+      if (Array.isArray(valor)) {
+        valor.forEach((v, i) => visitar(v, String(i), dataBase, profundidade + 1));
+        return;
+      }
+      if (typeof valor !== "object") return;
+
+      let dataLocal = dataBase;
+      const matchData = String(chave).match(/20\d{2}-\d{2}-\d{2}/);
+      if (matchData) dataLocal = matchData[0];
+
+      if (this._parecePartida(valor, chave)) {
+        const p = this._normalizarPartida(valor, chave, dataLocal);
+        if (p?.data && p?.horario) novo.set(`${p.data}|${p.horario}`, p);
+        return;
+      }
+
+      for (const [k, v] of Object.entries(valor)) visitar(v, k, dataLocal, profundidade + 1);
+    };
+
+    visitar(bruto);
+
+    // Calcula a assinatura ANTES de tocar no localStorage. O polling é frequente,
+    // mas se o Firebase devolveu exatamente a mesma agenda não há motivo para
+    // serializar/escrever caches de novo nem pressionar a renderização/escudos.
+    const assinaturaNova = JSON.stringify([...novo.entries()].map(([chave, p]) => [
+      chave, p.ordem, p.status, p.liga, p.mandante, p.visitante,
+      p.escudoMandante, p.escudoVisitante,
+      p.analise, p.sugestoes, p.confrontoDireto
+    ]));
+    const mudou = assinaturaNova !== this._assinaturaDados;
+    this._assinaturaDados = assinaturaNova;
+
+    // O Firebase do coletor já informa qual é a partida ATUAL e a ordem das
+    // próximas. Não usamos mais o relógio/resultados do site para decidir qual
+    // linha deve aparecer. Isso impede a agenda de "parar" quando passa um
+    // tempo sem chegar placar novo no histórico.
+    // Uma resposta válida do Firebase é a fonte de verdade da agenda atual.
+    // Se vier vazia, isso significa que NÃO há próximas partidas cadastradas.
+    // Erro de rede não passa por _absorver(), então não confundimos "vazio" com falha.
+    this._partidasRemotas = novo;
+    this._ultimaAtualizacaoRemota = Date.now();
+    if (!mudou) return false;
+
+    // Mantém uma memória local da agenda vista pelo coletor. Uma resposta vazia
+    // ou momentaneamente incompleta nunca apaga partidas já conhecidas.
+    const agenda = this._lerAgendaCache();
+    for (const [chave, p] of novo.entries()) {
+      const anterior = agenda.get(chave) || {};
+      agenda.set(chave, { ...anterior, ...p, _vistoEm: Date.now() });
+    }
+    this._salvarAgendaCache(agenda);
+
+    // Consulta por horário/data pode usar tanto o snapshot atual quanto o cache.
+    const uniao = new Map(agenda);
+    for (const [chave, p] of novo.entries()) uniao.set(chave, p);
+    this._partidas = uniao;
+
+    // Guarda os times que o coletor já mostrou para que, quando o placar
+    // chegar no histórico, a tela consiga montar a mesma linha com equipes e escudos.
+    try {
+      const chaveCache = "vai_na_fe_partidas_coletadas_base_zerada_v1";
+      const cache = JSON.parse(localStorage.getItem(chaveCache) || "{}");
+      for (const [chave, p] of novo.entries()) {
+        cache[chave] = {
+          data: p.data, horario: p.horario, liga: p.liga,
+          mandante: p.mandante, visitante: p.visitante,
+          escudoMandante: p.escudoMandante, escudoVisitante: p.escudoVisitante,
+          ordem: p.ordem, status: p.status
+        };
+      }
+      const entradas = Object.entries(cache).sort((a,b) => a[0].localeCompare(b[0])).slice(-500);
+      localStorage.setItem(chaveCache, JSON.stringify(Object.fromEntries(entradas)));
+    } catch (_) {}
+
+    return true;
+  },
+
+  _statusFinal(status) {
+    return ["finalizada", "finalizado", "encerrada", "encerrado", "finished", "final", "fim"].includes(String(status || "").toLowerCase());
+  },
+
+  snapshot() {
+    return [...this._partidas.values()];
+  },
+
+  obterPartida(slot) {
+    if (!slot?.data || !slot?.horario) return null;
+    return this._partidas.get(`${slot.data}|${slot.horario}`) || null;
+  },
+
+  _paraSlot(p) {
+    const [hora, minuto] = String(p.horario || "00:00").split(":").map(Number);
+    return { data: p.data, horario: p.horario, hora, minuto, timeZone: "Europe/London", _meta: p };
+  },
+
+  proximas(limite = 5) {
+    // A grade NÃO cria horários e NÃO reaproveita agenda antiga.
+    // Ela usa somente o snapshot atual do Firebase e ainda descarta qualquer
+    // registro cujo horário já passou no relógio oficial Europe/London.
+    // Isso evita que 02:12, 02:15 etc. reapareçam horas depois só porque o
+    // coletor deixou esses nós antigos em /proximas_partidas.
+    const remotas = [...this._partidasRemotas.values()].filter(p => !this._statusFinal(p.status));
+    if (!remotas.length) return [];
+
+    let chaveMinima = "";
+    try {
+      if (typeof RelogioPartidas !== "undefined" && RelogioPartidas.partidaAtual) {
+        const atual = RelogioPartidas.partidaAtual();
+        if (atual?.data && atual?.horario) chaveMinima = `${atual.data}|${atual.horario}`;
+      }
+    } catch (_) {}
+
+    if (!chaveMinima) {
+      try {
+        const agora = new Date();
+        const data = new Intl.DateTimeFormat("en-CA", {
+          timeZone: "Europe/London", year: "numeric", month: "2-digit", day: "2-digit"
+        }).format(agora);
+        const partes = new Intl.DateTimeFormat("en-GB", {
+          timeZone: "Europe/London", hour: "2-digit", minute: "2-digit", hour12: false
+        }).formatToParts(agora);
+        const vals = Object.fromEntries(partes.map(x => [x.type, x.value]));
+        chaveMinima = `${data}|${vals.hour}:${vals.minute}`;
+      } catch (_) {}
+    }
+
+    const validas = remotas.filter(p => {
+      if (!p?.data || !p?.horario) return false;
+      if (!chaveMinima) return true;
+      return `${p.data}|${p.horario}` >= chaveMinima;
+    });
+    if (!validas.length) return [];
+
+    // Depois de remover as vencidas, respeita a ordem do coletor apenas entre
+    // as partidas que ainda são atuais/futuras.
+    const temOrdem = validas.some(p => Number.isFinite(Number(p.ordem)));
+    const ordenadas = [...validas].sort((a, b) => {
+      const chaveA = `${a.data}|${a.horario}`;
+      const chaveB = `${b.data}|${b.horario}`;
+      if (chaveA !== chaveB) return chaveA.localeCompare(chaveB);
+      if (temOrdem) {
+        const ao = Number.isFinite(Number(a.ordem)) ? Number(a.ordem) : 9999;
+        const bo = Number.isFinite(Number(b.ordem)) ? Number(b.ordem) : 9999;
+        if (ao !== bo) return ao - bo;
+      }
+      return 0;
+    });
+
+    return ordenadas.slice(0, limite).map(p => this._paraSlot(p));
+  },
+
+  async carregarAgora() {
+    if (!this.configurada() || this._carregando) return false;
+    const statusAnterior = this._status;
+    const erroAnterior = this._erro;
+    this._carregando = true;
+    this._status = "carregando";
+    this._erro = "";
+    let deveEmitir = false;
+    try {
+      const bruto = await this._fetchJSON(this._url());
+      const mudou = this._absorver(bruto);
+      deveEmitir = mudou || statusAnterior !== "online";
+      this._status = "online";
+      return true;
+    } catch (e) {
+      const erroNovo = String(e?.message || e);
+      deveEmitir = statusAnterior !== "erro" || erroAnterior !== erroNovo;
+      this._status = "erro";
+      this._erro = erroNovo;
+      console.warn("Próximas partidas indisponíveis no Firebase de teste:", e);
+      return false;
+    } finally {
+      this._carregando = false;
+      if (deveEmitir) this._emitir();
+    }
+  },
+
+  iniciar() {
+    if (!this.configurada()) {
+      this._status = "nao-configurado";
+      this._emitir();
+      return false;
+    }
+    this.carregarAgora();
+    if (!this._timer) this._timer = setInterval(() => this.carregarAgora(), this.INTERVALO_MS);
+    return true;
+  },
+
+  parar() {
+    if (this._timer) clearInterval(this._timer);
+    this._timer = null;
+  }
+};
+"use strict";
+
+/*
+ * TESTE — INTELIGÊNCIA CONTEXTUAL POR PARTIDA
+ *
+ * Usa SOMENTE dados que o próprio projeto já possui/coleta:
+ * - mandante e visitante;
+ * - últimos 10 jogos do mandante em casa (peso maior);
+ * - últimos 10 jogos do visitante fora (peso maior);
+ * - histórico completo de casa/fora (peso menor);
+ * - confronto direto (qualquer mando e mesmo mando);
+ * - momento recente das equipes;
+ * - horário/faixas próximas;
+ * - previsão sequencial já calculada pelo núcleo.
+ *
+ * A distribuição geral atua como prior. Recortes pequenos são encolhidos em
+ * direção à média para evitar "100%" enganoso com 2 ou 3 ocorrências.
+ * Cada mercado aprende a confiabilidade relativa das fontes no próprio
+ * histórico associado a times. Se ainda não houver amostra suficiente, a
+ * camada contextual não substitui a análise existente.
+ */
+const AnaliseContextualTimes = {
+  MIN_RESULTADOS_COM_TIMES: 10,
+  // H2H não é trava: entra apenas como mais uma evidência, com peso proporcional à amostra.
+  MIN_CONFRONTOS_PARA_SUGERIR: 0,
+  MIN_FONTE: 3,
+  PRIOR_PADRAO: 12,
+  JANELA_MOMENTO: 20,
+  JANELA_FORMA_CONDICAO: 10,
+  _cacheConfiabilidade: new Map(),
+  _cacheHistoricoAssociado: { assinatura:"", hist:[] },
+  _cacheRecortes: new Map(),
+  _cachePrefixos: new Map(),
+  _cacheAnalises: new Map(),
+
+  _normTime(nome) {
+    const n = String(nome || "").trim().toLowerCase()
+      .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^a-z0-9]+/g, " ").trim();
+    const aliases = {
+      "islington": "arsenal", "arsenal fc": "arsenal",
+      "aston": "aston villa", "aston vila": "aston villa",
+      "man city": "manchester city", "city": "manchester city",
+      "manchester utd": "manchester united", "man utd": "manchester united", "united": "manchester united",
+      "palace": "crystal palace", "crystal palace fc": "crystal palace",
+      "spurs": "tottenham", "tottenham hotspur": "tottenham",
+      "wolves": "wolverhampton", "wolverhampton wanderers": "wolverhampton",
+      "west ham united": "west ham", "norwich city": "norwich",
+      "nottingham forest": "nottingham", "newcastle united": "newcastle",
+      "leeds united": "leeds", "leicester city": "leicester",
+      "brighton hove albion": "brighton", "afc bournemouth": "bournemouth"
+    };
+    return aliases[n] || n;
+  },
+
+  _minuto(horario) {
+    const m = String(horario || "").match(/^(\d{2}):(\d{2})$/);
+    if (!m) return null;
+    return Number(m[1]) * 60 + Number(m[2]);
+  },
+
+  _distMinuto(a, b) {
+    const x = this._minuto(a), y = this._minuto(b);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return Infinity;
+    const d = Math.abs(x - y);
+    return Math.min(d, 1440 - d);
+  },
+
+  _placar(v) {
+    const m = String(v?.placar ?? v ?? "").trim().toLowerCase().match(/^(\d+)\s*x\s*(\d+)$/);
+    if (!m) return null;
+    const casa = Number(m[1]), fora = Number(m[2]);
+    return { casa, fora, total: casa + fora, placar: `${casa}x${fora}` };
+  },
+
+  _valorMercado(item, k) {
+    const p = this._placar(item);
+    if (!p) return null;
+    if (k === "exato") return p.placar;
+    if (k === "gols") return String(Math.min(5, p.total));
+    if (k === "r12") return p.casa > p.fora ? "1" : p.casa < p.fora ? "2" : "X";
+    if (k === "bm") return p.casa > 0 && p.fora > 0 ? "SIM" : "NÃO";
+    if (k === "ou05" || k === "under05") return p.total > 0 ? "MAIS" : "MENOS";
+    if (k === "ou15") return p.total > 1 ? "MAIS" : "MENOS";
+    if (k === "ou25") return p.total > 2 ? "MAIS" : "MENOS";
+    if (k === "ou35" || k === "over35") return p.total > 3 ? "MAIS" : "MENOS";
+    return null;
+  },
+
+  _opcoes(k, base) {
+    if (k === "r12") return ["1", "X", "2"];
+    if (k === "bm") return ["SIM", "NÃO"];
+    if (k === "gols") return ["0", "1", "2", "3", "4", "5"];
+    if (k === "under05") return ["MENOS"];
+    if (k === "over35") return ["MAIS"];
+    if (["ou05", "ou15", "ou25", "ou35"].includes(k)) return ["MAIS", "MENOS"];
+    if (k === "exato") {
+      const freq = {};
+      for (const x of base || []) {
+        const v = this._valorMercado(x, k);
+        if (v) freq[v] = (freq[v] || 0) + 1;
+      }
+      return Object.entries(freq).sort((a,b)=>b[1]-a[1]).slice(0,12).map(x=>x[0]);
+    }
+    return [];
+  },
+
+  _mapaMetas() {
+    const mapa = new Map();
+    try {
+      const cache = JSON.parse(localStorage.getItem("vai_na_fe_partidas_coletadas_base_zerada_v1") || "{}");
+      for (const p of Object.values(cache || {})) {
+        if (p?.data && p?.horario && p?.mandante && p?.visitante) mapa.set(`${p.data}|${p.horario}`, p);
+      }
+    } catch (_) {}
+    try {
+      const snap = typeof TesteProximasPartidas !== "undefined" && typeof TesteProximasPartidas.snapshot === "function"
+        ? TesteProximasPartidas.snapshot() : [];
+      for (const p of snap || []) {
+        if (p?.data && p?.horario && p?.mandante && p?.visitante) mapa.set(`${p.data}|${p.horario}`, p);
+      }
+    } catch (_) {}
+    return mapa;
+  },
+
+  _fingerprintResultados(resultados) {
+    const lista = Array.isArray(resultados) ? resultados : [];
+    let h = 2166136261 >>> 0;
+    const add = (txt) => {
+      const s = String(txt ?? "");
+      for (let i=0;i<s.length;i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; }
+    };
+    add(lista.length);
+    for (const r of lista) {
+      add(r?._temporal?.data || r?.data || "");
+      add(r?._temporal?.horario || r?.horario || "");
+      add(r?.placar || "");
+      add(r?.mandante || "");
+      add(r?.visitante || "");
+    }
+    return `${lista.length}|${h.toString(36)}`;
+  },
+
+  _historicoAssociado(resultados) {
+    const assinaturaBruta = this._fingerprintResultados(resultados);
+    if (this._cacheHistoricoAssociado.assinatura === assinaturaBruta) return this._cacheHistoricoAssociado.hist;
+    const metas = this._mapaMetas();
+    const out = [];
+    for (const r of resultados || []) {
+      const data = r?._temporal?.data || r?.data || "";
+      const horario = r?._temporal?.horario || r?.horario || "";
+      const direto = (r?.mandante && r?.visitante) ? {
+        data, horario,
+        mandante: r.mandante, visitante: r.visitante,
+        escudoMandante: r.escudoMandante || "",
+        escudoVisitante: r.escudoVisitante || "",
+        liga: r.liga || "Inglês Doméstico (Esportes Virtuais)",
+        _origem: "historico_compartilhado"
+      } : null;
+      const meta = direto || metas.get(`${data}|${horario}`);
+      if (!meta?.mandante || !meta?.visitante || !this._placar(r)) continue;
+      out.push({
+        ...r,
+        _ctxData: data,
+        _ctxHorario: horario,
+        _ctxMandante: this._normTime(meta.mandante),
+        _ctxVisitante: this._normTime(meta.visitante),
+        _ctxMeta: meta
+      });
+    }
+    this._cacheHistoricoAssociado = { assinatura:assinaturaBruta, hist:out };
+    // Histórico mudou: resultados dependentes dele deixam de ser válidos.
+    this._cacheRecortes.clear();
+    this._cachePrefixos.clear();
+    this._cacheAnalises.clear();
+    return out;
+  },
+
+  _taxa(amostra, k, valor, priorP, prior = this.PRIOR_PADRAO) {
+    const lista = amostra || [];
+    let ok = 0, n = 0;
+    for (const x of lista) {
+      const v = this._valorMercado(x, k);
+      if (v == null) continue;
+      n++;
+      if (String(v) === String(valor)) ok++;
+    }
+    const p0 = Number.isFinite(priorP) ? priorP : 0.5;
+    return { n, bruta: n ? ok / n : p0, p: (ok + prior * p0) / (n + prior) };
+  },
+
+  _recortes(hist, meta) {
+    const mandante = this._normTime(meta?.mandante);
+    const visitante = this._normTime(meta?.visitante);
+    const horario = meta?.horario || "";
+    // Separa forma recente específica da condição e histórico amplo.
+    // A forma recente (últimos 10) recebe peso maior na previsão; o histórico
+    // completo continua participando como contexto de longo prazo, com peso menor.
+    const homeHistorico = hist.filter(x => x._ctxMandante === mandante);
+    const awayHistorico = hist.filter(x => x._ctxVisitante === visitante);
+    const homeRecente = homeHistorico.slice(-this.JANELA_FORMA_CONDICAO);
+    const awayRecente = awayHistorico.slice(-this.JANELA_FORMA_CONDICAO);
+    const h2hMesmo = hist.filter(x => x._ctxMandante === mandante && x._ctxVisitante === visitante);
+    const h2h = hist.filter(x =>
+      (x._ctxMandante === mandante && x._ctxVisitante === visitante) ||
+      (x._ctxMandante === visitante && x._ctxVisitante === mandante));
+    const momento = hist.filter(x =>
+      x._ctxMandante === mandante || x._ctxVisitante === mandante ||
+      x._ctxMandante === visitante || x._ctxVisitante === visitante).slice(-this.JANELA_MOMENTO);
+    const horario9 = hist.filter(x => this._distMinuto(x._ctxHorario, horario) <= 9);
+    const horario30 = hist.filter(x => this._distMinuto(x._ctxHorario, horario) <= 30);
+    const mesmaHora = hist.filter(x => String(x._ctxHorario || "").slice(0,2) === String(horario).slice(0,2));
+    return {
+      geral:hist,
+      mandanteRecente:homeRecente, visitanteRecente:awayRecente,
+      mandanteHistorico:homeHistorico, visitanteHistorico:awayHistorico,
+      // aliases mantidos apenas por compatibilidade com qualquer extensão antiga
+      mandante:homeHistorico, visitante:awayHistorico,
+      h2h, h2hMesmo, momento, horario9, horario30, mesmaHora
+    };
+  },
+
+  _recortesCacheados(hist, meta) {
+    const chave = `${this._assinatura(hist)}|${this._normTime(meta?.mandante)}|${this._normTime(meta?.visitante)}|${meta?.horario || ""}`;
+    const salvo = this._cacheRecortes.get(chave);
+    if (salvo) return salvo;
+    const rec = this._recortes(hist, meta);
+    this._cacheRecortes.set(chave, rec);
+    if (this._cacheRecortes.size > 480) this._cacheRecortes.delete(this._cacheRecortes.keys().next().value);
+    return rec;
+  },
+
+  _prefixoTaxa(hist, k, valor) {
+    const chave = `${this._assinatura(hist)}|${k}|${String(valor)}`;
+    const salvo = this._cachePrefixos.get(chave);
+    if (salvo) return salvo;
+    const ok = new Uint16Array(hist.length + 1);
+    const n = new Uint16Array(hist.length + 1);
+    for (let i=0;i<hist.length;i++) {
+      const v = this._valorMercado(hist[i], k);
+      ok[i+1] = ok[i];
+      n[i+1] = n[i];
+      if (v != null) { n[i+1]++; if (String(v) === String(valor)) ok[i+1]++; }
+    }
+    const out = {ok,n};
+    this._cachePrefixos.set(chave,out);
+    if (this._cachePrefixos.size > 160) this._cachePrefixos.delete(this._cachePrefixos.keys().next().value);
+    return out;
+  },
+
+  _h2hFirebase(meta) {
+    const out = [];
+    for (const x of meta?.confrontoDireto || []) {
+      const p = this._placar(x?.placar || x?.resultado || x);
+      if (p) out.push({ placar:p.placar, golsCasa:p.casa, golsFora:p.fora, totalGols:p.total });
+    }
+    return out;
+  },
+
+  _assinatura(hist) {
+    const p = hist?.[0], u = hist?.at(-1);
+    return `${hist.length}|${p?._ctxData || ""}|${p?._ctxHorario || ""}|${u?._ctxData || ""}|${u?._ctxHorario || ""}|${u?.placar || ""}`;
+  },
+
+  _confiabilidade(hist, k, valor, recorteNome) {
+    // Aprende a confiabilidade do recorte PARA ESTE LADO específico.
+    // Ex.: um recorte pode ajudar MAIS 1.5 e atrapalhar MENOS 1.5;
+    // uma coisa não herda a reputação da outra.
+    const chave = `${this._assinatura(hist)}|${k}|${String(valor)}|${recorteNome}`;
+    if (this._cacheConfiabilidade.has(chave)) return this._cacheConfiabilidade.get(chave);
+    if (hist.length < 60) return 1;
+
+    const inicio = Math.max(30, hist.length - 350);
+    const prefixo = this._prefixoTaxa(hist, k, valor);
+    let ganhos = 0, perdas = 0, usados = 0;
+    for (let i = inicio; i < hist.length; i += 2) {
+      const anteriores = hist.slice(0, i);
+      const alvo = hist[i];
+      const meta = alvo?._ctxMeta;
+      if (!meta) continue;
+      const rec = this._recortesCacheados(anteriores, meta)[recorteNome] || [];
+      const minimoFonte = (recorteNome === "h2h" || recorteNome === "h2hMesmo") ? 1 : this.MIN_FONTE;
+      if (rec.length < minimoFonte) continue;
+      const real = this._valorMercado(alvo, k);
+      if (real == null) continue;
+
+      const nBase = prefixo.n[i] || 0;
+      const baseP = nBase ? (prefixo.ok[i] / nBase) : 0.5;
+      const fonte = this._taxa(rec, k, valor, baseP);
+      const desvio = fonte.p - baseP;
+      if (Math.abs(desvio) < 0.02) continue;
+
+      usados++;
+      const aconteceu = String(real) === String(valor);
+      const direcaoAcertou = desvio > 0 ? aconteceu : !aconteceu;
+      if (direcaoAcertou) ganhos++; else perdas++;
+    }
+
+    let mult = 1;
+    if (usados >= 12) {
+      const taxa = ganhos / Math.max(1, ganhos + perdas);
+      mult = Math.max(0.72, Math.min(1.28, 0.82 + taxa * 0.42));
+    }
+    this._cacheConfiabilidade.set(chave, mult);
+    if (this._cacheConfiabilidade.size > 800) this._cacheConfiabilidade.delete(this._cacheConfiabilidade.keys().next().value);
+    return mult;
+  },
+
+  _pesoFonte(nome, n, confiabilidade) {
+    const base = {
+      // Forma recente na condição específica é deliberadamente a fonte mais
+      // valorizada entre casa/fora. O histórico amplo funciona como estabilizador.
+      mandanteRecente:1.85, visitanteRecente:1.85,
+      mandanteHistorico:0.62, visitanteHistorico:0.62,
+      mandante:0.62, visitante:0.62,
+      h2h:1.35, h2hMesmo:1.55,
+      momento:1.15, horario9:1.10, horario30:0.92, mesmaHora:0.82,
+      h2hFirebase:1.30, sequencia:1.05
+    }[nome] || 1;
+    const qualidade = n > 0 ? n / (n + this.PRIOR_PADRAO) : 0;
+    return base * qualidade * (Number.isFinite(confiabilidade) ? confiabilidade : 1);
+  },
+
+  _idIndividual(k, valor) {
+    return `${String(k || "")}:${String(valor ?? "")}`;
+  },
+
+  _podeVirarSugestao(k, valor) {
+    const v = String(valor ?? "").toUpperCase();
+    // O0.5 continua apenas como cálculo interno.
+    if (k === "ou05") return false;
+    // U3.5 continua fixo/separado e NÃO disputa as 3 sugestões.
+    // O3.5 disputa normalmente pelo especialista dedicado over35.
+    if (k === "ou35") return false;
+    if (k === "under05") return v === "MENOS";
+    if (k === "over35") return v === "MAIS";
+    return true;
+  },
+
+  _forcaSinal(edge, vantagemAprendida, qualidade, amostraAprendida, pContexto, taxaAprendida) {
+    const fatorAmostra = Math.min(1, Math.max(0, Number(amostraAprendida) || 0) / 20);
+    const sinal = (Number(edge) || 0) * 100 + (Number(vantagemAprendida) || 0) * 100 * 0.60 * fatorAmostra;
+    const seguranca = Math.max(Number(pContexto) || 0, fatorAmostra ? (Number(taxaAprendida) || 0) : 0);
+    // Um placar exato de 10% pode ter grande vantagem relativa, mas não vira
+    // "FORTE" só por isso: força também exige chance absoluta razoável.
+    if (sinal >= 8 && qualidade >= 0.18 && seguranca >= 0.45) return "FORTE";
+    if (sinal >= 4 && seguranca >= 0.35) return "BOA";
+    return "MODERADA";
+  },
+
+  _rotulo(k, valor) {
+    const v = String(valor ?? "").toUpperCase();
+    if (k === "bm") return v === "SIM" ? "Ambos Marcam — SIM" : "Ambos Marcam — NÃO";
+    if (k === "r12") return v === "1" ? "Mandante vence" : v === "2" ? "Visitante vence" : "Empate";
+    if (k === "gols") return `Total de Gols — ${v === "5" ? "5+ gols" : `${valor} gols`}`;
+    if (k === "exato") return `Placar Exato — ${valor}`;
+    if (k === "ou15") return v === "MAIS" ? "Mais de 1.5" : "Menos de 1.5";
+    if (k === "ou25") return v === "MAIS" ? "Mais de 2.5" : "Menos de 2.5";
+    if (k === "ou35") return v === "MAIS" ? "Mais de 3.5" : "Menos de 3.5";
+    if (k === "over35") return "Mais de 3.5";
+    if (k === "under05") return "Menos de 0.5";
+    if (k === "ou05") return v === "MAIS" ? "Mais de 0.5" : "Menos de 0.5";
+    return `${k} — ${valor}`;
+  },
+
+
+  _estatFormaCondicao(lista, time, lado) {
+    const alvo = this._normTime(time);
+    let n=0, v=0, e=0, d=0, gf=0, ga=0, marcou=0, clean=0, o15=0, o25=0, o35=0, btts=0;
+    for (const x of lista || []) {
+      const p = this._placar(x);
+      if (!p) continue;
+      const ehCasa = this._normTime(x?._ctxMandante || x?.mandante) === alvo;
+      const ehFora = this._normTime(x?._ctxVisitante || x?.visitante) === alvo;
+      if ((lado === "casa" && !ehCasa) || (lado === "fora" && !ehFora)) continue;
+      const pro = ehCasa ? p.casa : p.fora;
+      const contra = ehCasa ? p.fora : p.casa;
+      n++; gf += pro; ga += contra;
+      if (pro > contra) v++; else if (pro === contra) e++; else d++;
+      if (pro > 0) marcou++;
+      if (contra === 0) clean++;
+      if (p.total > 1) o15++;
+      if (p.total > 2) o25++;
+      if (p.total > 3) o35++;
+      if (p.casa > 0 && p.fora > 0) btts++;
+    }
+    const pct = x => n ? (x/n)*100 : 0;
+    return {n,v,e,d,gf,ga,mediaGF:n?gf/n:0,mediaGA:n?ga/n:0,ppg:n?(v*3+e)/n:0,marcou:pct(marcou),clean:pct(clean),o15:pct(o15),o25:pct(o25),o35:pct(o35),btts:pct(btts)};
+  },
+
+  _estatH2H(lista, mandante, visitante) {
+    const casaAlvo=this._normTime(mandante), foraAlvo=this._normTime(visitante);
+    let n=0, casaV=0, emp=0, foraV=0, gols=0, btts=0, o25=0;
+    for (const x of lista || []) {
+      const p=this._placar(x); if(!p) continue;
+      const m=this._normTime(x?._ctxMandante || x?.mandante), v=this._normTime(x?._ctxVisitante || x?.visitante);
+      const direto=m===casaAlvo && v===foraAlvo, invertido=m===foraAlvo && v===casaAlvo;
+      if(!direto && !invertido) continue;
+      const gCasaAtual=direto?p.casa:p.fora, gForaAtual=direto?p.fora:p.casa;
+      n++; gols+=p.total; if(p.casa>0&&p.fora>0)btts++; if(p.total>2)o25++;
+      if(gCasaAtual>gForaAtual)casaV++; else if(gCasaAtual===gForaAtual)emp++; else foraV++;
+    }
+    return {n,casaV,emp,foraV,mediaGols:n?gols/n:0,btts:n?btts/n*100:0,o25:n?o25/n*100:0};
+  },
+
+  _leituraConfronto(meta, recortes, candidatos) {
+    const mandante=String(meta?.mandante || "Mandante"), visitante=String(meta?.visitante || "Visitante");
+    const hc=this._estatFormaCondicao(recortes?.mandanteRecente || [], mandante, "casa");
+    const af=this._estatFormaCondicao(recortes?.visitanteRecente || [], visitante, "fora");
+    const h2h=this._estatH2H(recortes?.h2h || [], mandante, visitante);
+    const partes=[];
+    const fmt=x=>Number(x||0).toFixed(1).replace('.',',');
+    if(hc.n){
+      partes.push(`${mandante} em casa: ${hc.v}V/${hc.e}E/${hc.d}D nos últimos ${hc.n}, média ${fmt(hc.mediaGF)} gol(s) marcado(s) e ${fmt(hc.mediaGA)} sofrido(s)`);
+    } else partes.push(`${mandante} ainda sem amostra recente suficiente em casa`);
+    if(af.n){
+      partes.push(`${visitante} fora: ${af.v}V/${af.e}E/${af.d}D nos últimos ${af.n}, média ${fmt(af.mediaGF)} marcado(s) e ${fmt(af.mediaGA)} sofrido(s)`);
+    } else partes.push(`${visitante} ainda sem amostra recente suficiente fora`);
+
+    const amostras=[hc,af].filter(x=>x.n);
+    if(amostras.length){
+      const media=(campo)=>amostras.reduce((s,x)=>s+(Number(x[campo])||0),0)/amostras.length;
+      const o15=media('o15'), o25=media('o25'), btts=media('btts');
+      let perfilGols = o25 >= 62 ? 'tendência mais aberta para gols' : o15 >= 72 ? 'boa tendência de pelo menos 2 gols' : o15 <= 48 ? 'perfil mais travado e de poucos gols' : 'perfil de gols intermediário';
+      let perfilLados = btts >= 62 ? 'os dois lados vêm participando bastante dos gols' : btts <= 38 ? 'é comum pelo menos um dos lados passar em branco' : 'Ambos Marcam aparece de forma equilibrada';
+      partes.push(`${perfilGols}; ${perfilLados}`);
+    }
+
+    if(h2h.n){
+      const peso=h2h.n<=2?'leve':h2h.n<=5?'médio':'forte';
+      partes.push(`H2H: ${h2h.n} confronto(s), peso ${peso}, com ${h2h.casaV} vitória(s) de ${mandante}, ${h2h.emp} empate(s) e ${h2h.foraV} vitória(s) de ${visitante}`);
+    } else partes.push('H2H ainda sem confronto anterior; ele não interfere nesta leitura');
+
+    const diferenca=(hc.n?hc.ppg:0)-(af.n?af.ppg:0);
+    let equilibrio='confronto sem superioridade recente clara';
+    if(hc.n && af.n){
+      if(diferenca>=0.75) equilibrio=`momento específico favorece ${mandante} em casa`;
+      else if(diferenca<=-0.75) equilibrio=`momento específico favorece ${visitante} fora`;
+      else if(diferenca>=0.3) equilibrio=`leve vantagem recente para ${mandante} em casa`;
+      else if(diferenca<=-0.3) equilibrio=`leve vantagem recente para ${visitante} fora`;
+    }
+    const principal=(candidatos||[])[0];
+    const confPrincipal=Math.round(Number(principal?.confianca)||0);
+    const final=principal
+      ? (confPrincipal >= 35
+          ? `${equilibrio}. Sinal principal agora: ${principal.titulo} (${confPrincipal}%).`
+          : `${equilibrio}. Ainda não há sinal de alta confiança; o mercado melhor ranqueado é ${principal.titulo} (${confPrincipal}%).`)
+      : `${equilibrio}. Nenhum mercado ganhou vantagem suficiente para se destacar sozinho.`;
+    return `Leitura do confronto: ${partes.join('. ')}. Cenário esperado: ${final}`;
+  },
+
+  analisar(resultados, meta, mercadosBase = {}) {
+    const hist = this._historicoAssociado(resultados);
+    if (!meta?.mandante || !meta?.visitante) {
+      return { disponivel:false, motivo:"times", amostra:hist.length, confrontos:0, faltamConfrontos:this.MIN_CONFRONTOS_PARA_SUGERIR, candidatos:[], mercados:{} };
+    }
+
+    const recortes = this._recortesCacheados(hist, meta);
+    const mercadosSig = Object.entries(mercadosBase || {}).map(([k,m]) => `${k}:${m?.ativo?1:0}:${m?.palpite?.valor ?? ""}:${Math.round(Number(m?.palpite?.percentual)||0)}`).join("|");
+    const geracaoAprendizado = (typeof Aprendizado !== "undefined" ? `${Number(Aprendizado._geracao || 0)}:${Number(Aprendizado._processados?.size || 0)}` : "0:0");
+    const chaveAnalise = `${this._assinatura(hist)}|${this._normTime(meta.mandante)}|${this._normTime(meta.visitante)}|${meta?.data || ""}|${meta?.horario || ""}|${mercadosSig}|g${geracaoAprendizado}`;
+    const analiseSalva = this._cacheAnalises.get(chaveAnalise);
+    if (analiseSalva) return analiseSalva;
+
+    const confrontosVistos = recortes.h2h.length;
+    // SEM TRAVA H2H:
+    // 0 confrontos = H2H não pesa.
+    // 1+ confrontos = H2H participa gradualmente; o próprio _pesoFonte()
+    // encolhe amostras pequenas por n/(n+PRIOR_PADRAO).
+    const h2hFirebase = this._h2hFirebase(meta);
+    const mercados = {};
+    const candidatos = [];
+    const chaves = ["exato","gols","r12","bm","ou05","under05","ou15","ou25","ou35","over35"];
+
+    for (const k of chaves) {
+      const opcoes = this._opcoes(k, hist);
+      if (!opcoes.length) continue;
+      const avaliados = [];
+
+      for (const valor of opcoes) {
+        // Cada opção é avaliada e aprendida como mercado individual.
+        // A taxa do lado oposto nunca entra aqui.
+        const global = this._taxa(hist, k, valor, 0.5, 0);
+        let soma = global.p;
+        let peso = 1;
+        const evidencias = [];
+
+        for (const nome of ["mandanteRecente","visitanteRecente","mandanteHistorico","visitanteHistorico","h2h","h2hMesmo","momento","horario9","horario30","mesmaHora"]) {
+          const amostra = recortes[nome] || [];
+          const minimoFonte = (nome === "h2h" || nome === "h2hMesmo") ? 1 : this.MIN_FONTE;
+          if (amostra.length < minimoFonte) continue;
+          const t = this._taxa(amostra, k, valor, global.p);
+          const rel = this._confiabilidade(hist, k, valor, nome);
+          const w = this._pesoFonte(nome, t.n, rel);
+          if (w <= 0) continue;
+          soma += t.p * w;
+          peso += w;
+          evidencias.push({nome,n:t.n,p:t.p,w,rel});
+        }
+
+        if (h2hFirebase.length >= 1) {
+          const t = this._taxa(h2hFirebase,k,valor,global.p,8);
+          const w = this._pesoFonte("h2hFirebase",t.n,1);
+          soma += t.p*w;
+          peso += w;
+          evidencias.push({nome:"h2hFirebase",n:t.n,p:t.p,w,rel:1});
+        }
+
+        const base = mercadosBase?.[k];
+        if (base?.ativo && base?.palpite && String(base.palpite.valor) === String(valor)) {
+          const pBase = Math.max(0, Math.min(1, Number(base.palpite.percentual || 0)/100));
+          if (pBase > 0) {
+            const w = 0.85;
+            soma += pBase*w;
+            peso += w;
+            evidencias.push({nome:"sequencia",n:Math.max(3,Math.round((resultados||[]).length/20)),p:pBase,w,rel:1});
+          }
+        }
+
+        const p = soma / peso;
+        const edge = p - global.p;
+        const qualidade = Math.min(1, evidencias.reduce((s,e)=>s+Math.min(e.n,30),0)/120);
+        const desempenho = (typeof Aprendizado !== "undefined" && typeof Aprendizado.estatisticaMercado === "function")
+          ? Aprendizado.estatisticaMercado(k, valor)
+          : {amostra:0,taxa:0,taxaAjustada:50};
+        const taxaAprendida = (Number(desempenho.taxaAjustada) || 50) / 100;
+        const vantagemAprendida = desempenho.amostra >= 3 ? taxaAprendida - global.p : 0;
+        const fatorAmostra = Math.min(1, Math.max(0, Number(desempenho.amostra) || 0) / 20);
+        const qualidadeHistorica = desempenho.amostra >= 3
+          ? Math.max(0, Math.min(1, (taxaAprendida - 0.35) / 0.30))
+          : 0;
+        const segurancaIndividual = desempenho.amostra >= 3 ? Math.max(p, taxaAprendida) : p;
+        const penalidadeBaixa = Math.max(0, 0.35 - segurancaIndividual) * 0.55;
+
+        // IMPORTANTE: a frequência bruta NÃO dá pontos no ranking.
+        // O que vale é estar mais forte NESTE JOGO do que a própria taxa-base.
+        // A taxa individual só ajuda se também tiver qualidade absoluta; assim
+        // um placar exato raro não sobe ao Top 3 só por dobrar de 7% para 14%.
+        const score = 0.50
+          + Math.max(-0.20, Math.min(0.30, edge)) * 1.35
+          + Math.max(-0.25, Math.min(0.25, vantagemAprendida)) * 0.65 * fatorAmostra * qualidadeHistorica
+          + qualidade * 0.06
+          - penalidadeBaixa;
+        const forca = this._forcaSinal(edge, vantagemAprendida, qualidade, desempenho.amostra, p, taxaAprendida);
+
+        avaliados.push({
+          valor,p,global:global.p,edge,qualidade,score,evidencias,forca,
+          desempenho, vantagemAprendida, idIndividual:this._idIndividual(k,valor)
+        });
+      }
+
+      avaliados.sort((a,b)=>
+        b.score-a.score ||
+        b.edge-a.edge ||
+        (Number(b.desempenho?.taxaAjustada)||0)-(Number(a.desempenho?.taxaAjustada)||0) ||
+        b.p-a.p
+      );
+      const melhor = avaliados[0];
+      if (!melhor) continue;
+      mercados[k] = { k, melhor, opcoes:avaliados };
+
+      // ou05 e ou35 continuam calculados para os painéis, porém não disputam
+      // as sugestões: O0.5 fica fora; U3.5 é fixo; O3.5 vem por over35.
+      if (!this._podeVirarSugestao(k, melhor.valor)) continue;
+
+      const fortes = melhor.evidencias
+        .filter(e=>e.p > melhor.global + 0.02)
+        .sort((a,b)=>b.w-a.w).slice(0,3);
+      const nomes = {mandanteRecente:"últimos 10 do mandante em casa",visitanteRecente:"últimos 10 do visitante fora",mandanteHistorico:"histórico completo do mandante em casa",visitanteHistorico:"histórico completo do visitante fora",h2h:"H2H",h2hMesmo:"H2H mesmo mando",momento:"momento recente",horario9:"faixa ±9 min",horario30:"faixa ±30 min",mesmaHora:"mesma hora",h2hFirebase:"confrontos diretos",sequencia:"sequência atual"};
+      const apoio = fortes.length ? fortes.map(e=>`${nomes[e.nome]||e.nome} ${Math.round(e.p*100)}%/${e.n}`).join(" · ") : "sem recorte dominante";
+      const desempenho = melhor.desempenho || {amostra:0,taxa:0,taxaAjustada:50};
+      const vantagemPp = melhor.edge * 100;
+      const histPp = melhor.vantagemAprendida * 100;
+
+      candidatos.push({
+        k, valor:melhor.valor, titulo:this._rotulo(k,melhor.valor),
+        idIndividual:melhor.idIndividual, forca:melhor.forca,
+        confianca:melhor.p*100, media:melhor.global*100, ganho:vantagemPp,
+        qualidade:melhor.qualidade*100, score:melhor.score,
+        taxaHistorica:desempenho.taxa, amostraHistorica:desempenho.amostra, taxaAjustada:desempenho.taxaAjustada,
+        vantagemHistorica:histPp,
+        descricao:`${melhor.forca}: base ${Math.round(melhor.global*100)}% → contexto ${Math.round(melhor.p*100)}% (${vantagemPp>=0?"+":""}${vantagemPp.toFixed(1)} p.p.) · ${desempenho.amostra ? `este lado acertou ${desempenho.taxa.toFixed(1)}% em ${desempenho.amostra} chamada(s)` : "este lado ainda formando amostra"} · H2H ${confrontosVistos ? `${confrontosVistos}` : "0"} · ${apoio}.`
+      });
+    }
+
+    candidatos.sort((a,b)=>
+      b.score-a.score ||
+      b.ganho-a.ganho ||
+      (Number(b.taxaAjustada)||0)-(Number(a.taxaAjustada)||0) ||
+      b.confianca-a.confianca
+    );
+    const leituraConfronto = this._leituraConfronto(meta, recortes, candidatos);
+    const saida = {
+      disponivel:true, amostra:hist.length, confrontos:confrontosVistos, faltamConfrontos:0, candidatos, mercados,
+      leituraConfronto,
+      contexto:{
+        mandanteRecente:this._estatFormaCondicao(recortes.mandanteRecente || [], meta.mandante, "casa"),
+        visitanteRecente:this._estatFormaCondicao(recortes.visitanteRecente || [], meta.visitante, "fora"),
+        h2h:this._estatH2H(recortes.h2h || [], meta.mandante, meta.visitante)
+      },
+      resumo:`IA ativa: cada lado é independente. A frequência normal do mercado não dá prioridade sozinha; o ranking procura vantagem sobre a própria taxa-base. Últimos 10 casa/fora têm peso maior, histórico amplo peso menor, e H2H, momento, horário, sequência e acerto individual completam a leitura em ${hist.length} resultados.`
+    };
+    this._cacheAnalises.set(chaveAnalise, saida);
+    if (this._cacheAnalises.size > 90) this._cacheAnalises.delete(this._cacheAnalises.keys().next().value);
+    return saida;
+  }
+};
+
+if (typeof window !== "undefined") window.AnaliseContextualTimes = AnaliseContextualTimes;
+"use strict";
+
+/*
+ * ALTERAÇÃO VISUAL DE TESTE
+ * - Mantém o nome VAI NA FÉ VIRTUAL.
+ * - Altera somente a página Entradas para aproximar o layout da referência.
+ * - Lê /proximas_partidas no MESMO Firebase do núcleo.
+ * - /historico_compartilhado continua exclusivo para resultados finalizados.
+ * - Sem dados reais de equipes, mostra "Aguardando configurações".
+ */
+(function () {
+  if (typeof Interface === "undefined") return;
+
+  const AGUARDA = "Aguardando configurações";
+  const esc = v => String(v ?? "").replace(/[&<>\"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+  const num = v => Number.isFinite(Number(v)) ? Number(v) : null;
+  const pct = v => num(v) !== null ? `${Math.round(Number(v))}%` : "—";
+  const odd = v => num(v) !== null ? Number(v).toFixed(2) : "—";
+
+  const originalIniciar = Interface.iniciar.bind(Interface);
+  const originalRender = Interface._renderModerno.bind(Interface);
+  const originalAtualizarEntradas = Interface.atualizar.bind(Interface);
+  const originalEventosPagina = Interface._eventosPaginaModerna.bind(Interface);
+  const originalEstilos = Interface._estilosModernos.bind(Interface);
+  const originalConfig = Interface._pagina_configuracoes.bind(Interface);
+
+  Interface._partidaSelecionadaTeste = null;
+  Interface._resultadoSelecionadoTeste = null;
+  Interface._CHAVE_SUGESTOES_HISTORICAS_TESTE = "vai_na_fe_sugestoes_oficiais_v27";
+  Interface._MARCADOR_SUGESTOES_V27 = "vai_na_fe_sugestoes_oficiais_v27_iniciado";
+  Interface._assinaturaOficialAtualTeste = "";
+  Interface._ultimaPartidaAtualOficialTeste = null;
+  Interface._cacheSugestoesPartidaTeste = new Map();
+
+  Interface.iniciar = function () {
+    // A V27 começa uma trilha NOVA de sugestões oficiais. Registros antigos das
+    // versões que salvavam prévias ou recalculavam palpites após o jogo são ignoradas para
+    // não contaminar GREEN/RED. Histórico e aprendizado NÃO são apagados.
+    try {
+      if (localStorage.getItem(this._MARCADOR_SUGESTOES_V27) !== "ok") {
+        [
+          "vai_na_fe_sugestoes_historicas_individuais_v21",
+          "vai_na_fe_sugestoes_historicas_imutaveis_v25",
+          "vai_na_fe_sugestoes_salvas_v26"
+        ].forEach(k => localStorage.removeItem(k));
+        localStorage.setItem(this._MARCADOR_SUGESTOES_V27, "ok");
+      }
+    } catch (_) {}
+    originalIniciar();
+    if (typeof TesteProximasPartidas !== "undefined") TesteProximasPartidas.iniciar();
+  };
+
+  // Evita repetir o processamento pesado do painel quando nada relevante mudou.
+  // Relógio e agenda continuam atualizando de forma leve por seus próprios eventos.
+  Interface._ultimaAssinaturaAtualizacaoPesadaTeste = "";
+  Interface._assinaturaAtualizacaoPesadaTeste = function () {
+    const r = typeof Historico !== "undefined" && Historico.obterUltimo ? Historico.obterUltimo() : null;
+    const qtd = typeof Historico !== "undefined" && Historico.obterQuantidade ? Historico.obterQuantidade() : 0;
+    const aprendidos = typeof Aprendizado !== "undefined" ? Number(Aprendizado._processados?.size || 0) : 0;
+    return `${qtd}|${r?.id||""}|${r?._temporal?.data||""}|${r?._temporal?.horario||""}|${r?.placar||""}|a${aprendidos}`;
+  };
+
+  Interface.atualizar = function () {
+    const assinatura = this._assinaturaAtualizacaoPesadaTeste();
+    let retorno;
+    if (assinatura !== this._ultimaAssinaturaAtualizacaoPesadaTeste) {
+      this._ultimaAssinaturaAtualizacaoPesadaTeste = assinatura;
+      retorno = originalAtualizarEntradas();
+      // Só verifica promoção para OFICIAL quando algo relevante mudou. A agenda
+      // também dispara sua própria verificação no evento específico abaixo.
+      try { if (typeof this._garantirSugestaoOficialAtualTeste === "function") this._garantirSugestaoOficialAtualTeste(); } catch (_) {}
+    } else {
+      try {
+        const agora = typeof RelogioPartidas !== "undefined" ? RelogioPartidas.agora() : null;
+        const atual = typeof RelogioPartidas !== "undefined" ? RelogioPartidas.partidaAtual() : null;
+        const proxima = typeof RelogioPartidas !== "undefined" ? RelogioPartidas.proximaPartida() : null;
+        if (typeof this._atualizarRelogioModerno === "function") this._atualizarRelogioModerno({agora,atual,proxima});
+      } catch (_) {}
+    }
+    return retorno;
+  };
+
+  // OTIMIZAÇÃO SEGURA SOBRE A V22 FUNCIONAL:
+  // não monta a página inteira a cada segundo. A assinatura só muda quando
+  // histórico, agenda, seleção ou aprendizado COMPLETO mudam. Nenhum resultado
+  // é cortado e a origem dos dados continua exatamente a mesma da V22.
+  Interface._ultimaAssinaturaEntradasTeste = "";
+  Interface._ultimaPaginaRenderizadaTeste = null;
+  Interface._assinaturaRenderEntradasTeste = function () {
+    const r = typeof Historico !== "undefined" && Historico.obterUltimo ? Historico.obterUltimo() : null;
+    const qtd = typeof Historico !== "undefined" && Historico.obterQuantidade ? Historico.obterQuantidade() : 0;
+    const prox = typeof TesteProximasPartidas !== "undefined" ? String(TesteProximasPartidas._assinaturaDados || "") : "";
+    const aprendidos = typeof Aprendizado !== "undefined" ? Number(Aprendizado._processados?.size || 0) : 0;
+    return `${qtd}|${r?.id||""}|${r?._temporal?.data||""}|${r?._temporal?.horario||""}|${r?.placar||""}|${prox}|${this._partidaSelecionadaTeste||""}|${this._resultadoSelecionadoTeste||""}|a${aprendidos}`;
+  };
+
+  Interface._renderModerno = function () {
+    if (this._paginaModerna === "entradas") {
+      const content = document.getElementById("ia-content");
+      const assinatura = this._assinaturaRenderEntradasTeste();
+      if (this._ultimaPaginaRenderizadaTeste === "entradas" && this._ultimaAssinaturaEntradasTeste === assinatura && content && content.childNodes.length) {
+        try {
+          const agora = typeof RelogioPartidas !== "undefined" ? RelogioPartidas.agora() : null;
+          const atual = typeof RelogioPartidas !== "undefined" ? RelogioPartidas.partidaAtual() : null;
+          const proxima = typeof RelogioPartidas !== "undefined" ? RelogioPartidas.proximaPartida() : null;
+          if (typeof this._atualizarRelogioModerno === "function") this._atualizarRelogioModerno({agora,atual,proxima});
+        } catch (_) {}
+        return;
+      }
+      this._ultimaAssinaturaEntradasTeste = assinatura;
+    }
+
+    originalRender();
+    this._ultimaPaginaRenderizadaTeste = this._paginaModerna;
+
+    if (this._paginaModerna === "entradas") {
+      const sub = document.getElementById("ia-page-subtitle");
+      if (sub) sub.textContent = "Veja as melhores oportunidades de entrada com base na análise dos padrões e no histórico.";
+    }
+  };
+
+  Interface._slotsEntradasTeste = function () {
+    // Nada é inventado aqui. A grade mostra exclusivamente o que estiver
+    // cadastrado AGORA em /proximas_partidas pelo coletor.
+    if (typeof TesteProximasPartidas === "undefined") return [];
+    return TesteProximasPartidas.proximas(5);
+  };
+
+  Interface._metaPartidaTeste = function (slot) {
+    if (slot?._meta) return slot._meta;
+    return (typeof TesteProximasPartidas !== "undefined") ? TesteProximasPartidas.obterPartida(slot) : null;
+  };
+
+  Interface._rotuloPickTeste = function (pick) {
+    if (!pick) return AGUARDA;
+    if (typeof ConsultorEntradas !== "undefined" && ConsultorEntradas._rotuloPick && pick.k) {
+      try { return ConsultorEntradas._rotuloPick(pick); } catch (_) {}
+    }
+    return String(pick.mercado || pick.nome || pick.valor || AGUARDA);
+  };
+
+  // Na tela de Entradas, cada LADO aparece como mercado individual.
+  // Ex.: "Mais de 1.5" e "Menos de 1.5" nunca aparecem como um único O/U.
+  Interface._rotuloEntradaMercadoTeste = function (k, mercado) {
+    if (!(mercado?.ativo && mercado?.palpite)) return AGUARDA;
+    const valor = String(mercado.palpite.valor ?? "").trim().toUpperCase();
+    if (k === "ou15") return valor === "MAIS" ? "Mais de 1.5" : "Menos de 1.5";
+    if (k === "ou25") return valor === "MAIS" ? "Mais de 2.5" : "Menos de 2.5";
+    if (k === "ou35") return valor === "MAIS" ? "Mais de 3.5" : "Menos de 3.5";
+    if (k === "over35") return "Mais de 3.5";
+    if (k === "under05") return "Menos de 0.5";
+    if (k === "ou05") return valor === "MAIS" ? "Mais de 0.5" : "Menos de 0.5";
+    if (k === "bm") return valor === "SIM" ? "Ambos Marcam — SIM" : "Ambos Marcam — NÃO";
+    if (k === "r12") return valor === "1" ? "Mandante vence" : valor === "2" ? "Visitante vence" : "Empate";
+    if (k === "gols") return `Total de Gols — ${valor === "5" ? "5+" : valor} gols`;
+    if (k === "exato") return `Placar Exato — ${String(mercado.palpite.valor ?? "")}`;
+    return this._rotuloMercado(k, mercado) || String(mercado.palpite.valor ?? AGUARDA);
+  };
+
+  // O Over 0.5 continua sendo calculado pelos especialistas, mas não pode
+  // aparecer como sugestão de entrada porque a odd costuma ser baixa demais.
+  // Under 0.5 continua liberado normalmente.
+  Interface._tituloIndividualSugestaoTeste = function (s) {
+    if (!s) return AGUARDA;
+    const k = String(s.k || s.mercado || "");
+    const valor = s.valor ?? s.palpite?.valor ?? "";
+    if (k) {
+      const titulo = this._rotuloEntradaMercadoTeste(k, {ativo:true, palpite:{valor}});
+      if (titulo && titulo !== AGUARDA) return titulo;
+    }
+    return String(s.titulo || s.nome || AGUARDA);
+  };
+
+  Interface._ehOver05SugestaoTeste = function (s) {
+    if (!s) return false;
+    const k = String(s.mercado ?? s.k ?? "").trim();
+    const valor = String(s.valor ?? s.palpite?.valor ?? "").trim().toUpperCase();
+    if ((k === "ou05" || k === "under05") && valor === "MAIS") return true;
+    const titulo = String(s.titulo ?? s.rotuloCompleto ?? s.mercadoCompleto ?? s.mercadoNome ?? s.nome ?? "")
+      .toLowerCase().replace(/,/g, ".");
+    return /(?:mais\s+de\s+0\.5|over\s+0\.5)/i.test(titulo);
+  };
+
+  Interface._ehUnder35FixoSugestaoTeste = function (s) {
+    if (!s) return false;
+    const k = String(s.mercado ?? s.k ?? "").trim();
+    const valor = String(s.valor ?? s.palpite?.valor ?? "").trim().toUpperCase();
+    // Só o UNDER 3.5 fica fora. OVER 3.5 continua liberado normalmente.
+    if (k === "ou35" && valor === "MENOS") return true;
+    const titulo = String(s.titulo ?? s.rotuloCompleto ?? s.mercadoCompleto ?? s.mercadoNome ?? s.nome ?? "")
+      .toLowerCase().replace(/,/g, ".");
+    return /(?:menos\s+de\s+3\.5|under\s+3\.5)/i.test(titulo);
+  };
+
+  Interface._filtrarSugestoesTeste = function (lista) {
+    return (Array.isArray(lista) ? lista : []).filter(x =>
+      !this._ehOver05SugestaoTeste(x) && !this._ehUnder35FixoSugestaoTeste(x)
+    );
+  };
+
+  Interface._under35FixoTeste = function (d) {
+    const m = d?.mercados?.ou35 || null;
+    const valor = String(m?.palpite?.valor ?? "").toUpperCase();
+    const ativo = Boolean(m?.ativo && m?.palpite && valor === "MENOS" && !m?.bloqueado);
+    const confianca = ativo ? (num(m?.palpite?.percentual) ?? 0) : null;
+    let descricao = "Fica sempre visível e não ocupa nenhuma das 3 sugestões.";
+    if (ativo) descricao = `Sinal ativo para Menos de 3.5${confianca !== null ? ` · confiança ${Math.round(confianca)}%` : ""}.`;
+    else if (m?.bloqueado && m?.motivoBloqueio) descricao = `Sem chamada agora · ${m.motivoBloqueio}.`;
+    else descricao = "Sem chamada agora · o especialista U3.5 permanece visível e aguarda um contexto melhor.";
+    return { ativo, titulo:"Menos de 3.5", confianca, descricao, status: ativo ? "ACIONADO" : "SEM CHAMADA" };
+  };
+
+  Interface._sugestoesEntradasTeste = function (d, meta) {
+    // PRIMEIRO tenta a nova camada contextual. Ela não inventa times: só entra
+    // em ação quando já existem resultados anteriores associados pelo coletor.
+    // Enquanto a amostra ainda é pequena, o comportamento antigo é preservado.
+    try {
+      if (typeof AnaliseContextualTimes !== "undefined" && meta?.mandante && meta?.visitante) {
+        const contextual = AnaliseContextualTimes.analisar(d.resultados || [], meta, d.mercados || {});
+        this._ultimaAnaliseContextualTeste = contextual;
+
+        // H2H não bloqueia mais a análise; contextual só fica indisponível
+        // quando faltam dados básicos (ex.: times associados).
+        if (!contextual?.disponivel) return [];
+
+        if (contextual.candidatos?.length) {
+          const candidatos = contextual.candidatos.map((x, i) => ({
+            titulo: x.titulo,
+            descricao: x.descricao,
+            confianca: x.confianca,
+            principal: i === 0,
+            contextual: true,
+            mercado: x.k,
+            k: x.k,
+            valor: x.valor,
+            media: x.media,
+            ganho: x.ganho,
+            qualidade: x.qualidade,
+            taxaHistorica: x.taxaHistorica,
+            amostraHistorica: x.amostraHistorica,
+            taxaAjustada: x.taxaAjustada,
+            vantagemHistorica: x.vantagemHistorica,
+            idIndividual: x.idIndividual,
+            forca: x.forca,
+            score: x.score
+          }));
+          candidatos.sort((a,b) =>
+            (Number(b.score)||0)-(Number(a.score)||0) ||
+            (Number(b.taxaAjustada)||0)-(Number(a.taxaAjustada)||0) ||
+            (Number(b.confianca)||0)-(Number(a.confianca)||0)
+          );
+          return this._filtrarSugestoesTeste(candidatos).slice(0, 3).map((x, i) => ({...x, principal:i === 0}));
+        }
+        return [];
+      } else {
+        this._ultimaAnaliseContextualTeste = null;
+        return [];
+      }
+    } catch (e) {
+      this._ultimaAnaliseContextualTeste = {disponivel:false, erro:String(e?.message || e)};
+      return [];
+    }
+
+    if (Array.isArray(meta?.sugestoes) && meta.sugestoes.length) {
+      const lista = meta.sugestoes.map((x, i) => ({
+        titulo: x.rotuloCompleto || x.mercadoCompleto || x.mercado || x.nome || `Entrada ${i + 1}`,
+        descricao: x.descricao || "",
+        confianca: x.confianca,
+        principal: x.principal || i === 0,
+        mercado: x.k || x.mercadoId || x.mercado || "",
+        k: x.k || x.mercadoId || "",
+        valor: x.valor ?? x.palpite ?? x.resultado ?? ""
+      }));
+      return this._filtrarSugestoesTeste(lista).slice(0, 3).map((x, i) => ({...x, principal:i === 0}));
+    }
+
+    try {
+      if (typeof ConsultorEntradas !== "undefined") {
+        const estado = JSON.parse(localStorage.getItem(ConsultorEntradas.CHAVE_ESTADO) || "null");
+        const rec = estado?.recomendacao;
+        if (rec?.picks?.length && Number(rec.baseQtd) === Number(d.resultados?.length)) {
+          const lista = rec.picks.map((x, i) => ({
+            titulo: this._rotuloPickTeste(x),
+            descricao: x.motivo || "",
+            confianca: x.prob,
+            principal: i === 0,
+            mercado: x.k || "",
+            k: x.k || "",
+            valor: x.valor ?? ""
+          }));
+          return this._filtrarSugestoesTeste(lista).slice(0, 3).map((x, i) => ({...x, principal:i === 0}));
+        }
+      }
+    } catch (_) {}
+
+    const lista = Object.entries(d.mercados || {})
+      .filter(([, x]) => x?.ativo && x?.palpite)
+      .sort((a, b) => (Number(b[1].palpite.percentual) || 0) - (Number(a[1].palpite.percentual) || 0))
+      .map(([k, x], i) => ({
+        titulo: this._rotuloEntradaMercadoTeste(k, x),
+        descricao: "Entrada indicada pela análise dos padrões e do histórico.",
+        confianca: x.palpite.percentual,
+        principal: i === 0,
+        mercado: k,
+        k,
+        valor: x.palpite.valor
+      }));
+    return this._filtrarSugestoesTeste(lista).slice(0, 3).map((x, i) => ({...x, principal:i === 0}));
+  };
+
+  // Cache por partida/histórico: tocar novamente na mesma partida não recalcula
+  // toda a análise contextual. O cache é invalidado automaticamente quando entra
+  // resultado novo, muda o aprendizado ou muda a leitura-base dos mercados.
+  const _sugestoesEntradasSemCacheV27 = Interface._sugestoesEntradasTeste.bind(Interface);
+  Interface._sugestoesEntradasTeste = function (d, meta) {
+    const resultados = d?.resultados || [];
+    const ultimo = resultados.at(-1);
+    const aprendidos = typeof Aprendizado !== "undefined" ? Number(Aprendizado._processados?.size || 0) : 0;
+    const mercSig = Object.entries(d?.mercados || {}).map(([k,m]) => `${k}:${m?.ativo?1:0}:${m?.palpite?.valor??""}:${Math.round(Number(m?.palpite?.percentual)||0)}`).join("|");
+    const chave = `${resultados.length}|${ultimo?._temporal?.data||""}|${ultimo?._temporal?.horario||""}|${ultimo?.placar||""}|a${aprendidos}|${meta?.data||""}|${meta?.horario||""}|${meta?.mandante||""}|${meta?.visitante||""}|${mercSig}`;
+    const cache = this._cacheSugestoesPartidaTeste || (this._cacheSugestoesPartidaTeste = new Map());
+    if (cache.has(chave)) {
+      const salvo = cache.get(chave);
+      this._ultimaAnaliseContextualTeste = salvo.contexto || null;
+      return salvo.sugestoes.map(x => ({...x}));
+    }
+    const sugestoes = _sugestoesEntradasSemCacheV27(d, meta) || [];
+    cache.set(chave, { sugestoes:sugestoes.map(x=>({...x})), contexto:this._ultimaAnaliseContextualTeste ? {...this._ultimaAnaliseContextualTeste} : null });
+    if (cache.size > 30) cache.delete(cache.keys().next().value);
+    return sugestoes;
+  };
+
+  Interface._lerSnapshotsSugestoesTeste = function () {
+    try { return JSON.parse(localStorage.getItem(this._CHAVE_SUGESTOES_HISTORICAS_TESTE) || "{}") || {}; }
+    catch (_) { return {}; }
+  };
+
+  Interface._temResultadoDoSlotTeste = function (resultados, slot) {
+    return (resultados || []).some(r => {
+      const dataResultado = r?._temporal?.data || r?.dataPartida || r?.data || "";
+      const horarioResultado = r?._temporal?.horario || r?.horario || "";
+      if (String(horarioResultado) !== String(slot?.horario || "")) return false;
+      return !dataResultado || !slot?.data || String(dataResultado) === String(slot.data);
+    });
+  };
+
+  Interface._obterSnapshotSugestoesTeste = function (slot) {
+    if (!slot?.data || !slot?.horario) return null;
+    const mapa = this._lerSnapshotsSugestoesTeste();
+    return mapa[`${slot.data}|${slot.horario}`] || null;
+  };
+
+  // REGRA V28:
+  // - Jogos futuros: apenas PRÉVIA, nunca são gravados.
+  // - Primeiro jogo da fila: as 3 sugestões viram OFICIAIS e são gravadas UMA vez.
+  // - Depois de gravadas, nunca são alteradas. O resultado apenas marca GREEN/RED.
+  Interface._salvarSugestaoOficialTeste = function (slot, meta, sugestoes, baseQtd, analise = "") {
+    if (!slot?.data || !slot?.horario) return null;
+    const mapa = this._lerSnapshotsSugestoesTeste();
+    const chave = `${slot.data}|${slot.horario}`;
+    if (mapa[chave]?.sugestoes?.length) return mapa[chave];
+
+    const lista = this._filtrarSugestoesTeste(sugestoes).slice(0, 3).map((x, i) => ({
+      titulo: this._tituloIndividualSugestaoTeste(x),
+      descricao: x.descricao || "",
+      confianca: num(x.confianca),
+      principal: i === 0,
+      mercado: x.mercado || x.k || "",
+      k: x.k || x.mercado || "",
+      valor: x.valor ?? "",
+      forca: x.forca || ""
+    }));
+    if (!lista.length) return null;
+
+    const registro = {
+      versao:"v28-oficial", status:"oficial", imutavel:true,
+      data:slot.data, horario:slot.horario, oficialEm:new Date().toISOString(),
+      baseQtd:Number(baseQtd)||0, mandante:meta?.mandante||"", visitante:meta?.visitante||"",
+      liga:meta?.liga||"Inglês Doméstico (Esportes Virtuais)",
+      analise:String(analise || ""), sugestoes:lista
+    };
+    mapa[chave] = registro;
+    const entradas = Object.entries(mapa).sort((a,b)=>String(a[0]).localeCompare(String(b[0])));
+    const limitado = Object.fromEntries(entradas.slice(-500));
+    try { localStorage.setItem(this._CHAVE_SUGESTOES_HISTORICAS_TESTE, JSON.stringify(limitado)); } catch (_) {}
+    return registro;
+  };
+
+  Interface._partidaAtualOficialTeste = function (slots, resultados) {
+    for (const slot of (Array.isArray(slots) ? slots : [])) {
+      if (!this._temResultadoDoSlotTeste(resultados, slot)) return slot;
+    }
+    return null;
+  };
+
+  Interface._garantirSugestaoOficialAtualTeste = function (dados = null, slots = null) {
+    if (window.__VAI_NA_FE_BASE_PRONTA__ !== true) return null;
+    if (typeof this._dadosModernos !== "function") return null;
+    const d = dados || this._dadosModernos();
+    const listaSlots = Array.isArray(slots) ? slots : this._slotsEntradasTeste(d);
+    const atual = this._partidaAtualOficialTeste(listaSlots, d.resultados || []);
+    if (!atual) return null;
+
+    // Se a primeira partida mudou durante esta sessão, só promovemos a nova
+    // para OFICIAL depois que o resultado da anterior realmente chegou ao
+    // histórico. Isso evita congelar o jogo seguinte com uma prévia calculada
+    // alguns segundos antes do placar anterior entrar no Firebase/local.
+    const chaveAtual = `${atual.data}|${atual.horario}`;
+    const anterior = this._ultimaPartidaAtualOficialTeste;
+    if (anterior && anterior.chave !== chaveAtual) {
+      const anteriorFinalizada = this._temResultadoDoSlotTeste(d.resultados || [], anterior.slot);
+      if (!anteriorFinalizada) return null;
+    }
+    this._ultimaPartidaAtualOficialTeste = { chave:chaveAtual, slot:{ data:atual.data, horario:atual.horario } };
+
+    const existente = this._obterSnapshotSugestoesTeste(atual);
+    if (existente?.sugestoes?.length) return existente;
+
+    const meta = this._metaPartidaTeste(atual);
+    if (!meta?.mandante || !meta?.visitante) return null;
+    const ultimo = (d.resultados || []).at(-1);
+    const aprendidos = typeof Aprendizado !== "undefined" ? Number(Aprendizado._processados?.size || 0) : 0;
+    const assinatura = `${atual.data}|${atual.horario}|${d.resultados?.length||0}|${ultimo?._temporal?.data||""}|${ultimo?._temporal?.horario||""}|${ultimo?.placar||""}|a${aprendidos}`;
+    if (assinatura === this._assinaturaOficialAtualTeste) return null;
+    this._assinaturaOficialAtualTeste = assinatura;
+
+    const sugestoes = this._sugestoesEntradasTeste(d, meta);
+    if (!Array.isArray(sugestoes) || !sugestoes.length) return null;
+    const ctx = this._ultimaAnaliseContextualTeste;
+    return this._salvarSugestaoOficialTeste(atual, meta, sugestoes, d.resultados?.length || 0, ctx?.leituraConfronto || ctx?.resumo || "");
+  };
+
+  Interface._chaveResultadoTeste = function (r, indice = -1) {
+    const data = r?._temporal?.data || r?.dataPartida || r?.data || "";
+    const horario = r?._temporal?.horario || r?.horario || "";
+    return `${data}|${horario}|${indice}`;
+  };
+
+  Interface._sugestoesDePalpitesRegistradosTeste = function (registro) {
+    const palpites = registro?.palpites || {};
+    const lista = Object.entries(palpites).map(([k, p]) => ({
+      titulo: this._rotuloEntradaMercadoTeste(k, {ativo:true, palpite:p}),
+      descricao: "Palpite registrado antes do resultado.",
+      confianca: Number(p?.percentual) || 0,
+      principal: false,
+      mercado: k,
+      k,
+      valor: p?.valor
+    })).sort((a,b) => Number(b.confianca || 0) - Number(a.confianca || 0));
+    return this._filtrarSugestoesTeste(lista).slice(0, 3).map((x,i)=>({...x,principal:i===0}));
+  };
+
+  Interface._sugestoesHistoricasResultadoTeste = function (d, r, indice, meta) {
+    const slot = {
+      data:r?._temporal?.data || r?.dataPartida || r?.data || "",
+      horario:r?._temporal?.horario || r?.horario || "",
+      timeZone:r?._temporal?.timeZone || "Europe/London"
+    };
+    const registro = this._obterSnapshotSugestoesTeste(slot);
+    if (registro?.status === "oficial" && registro?.sugestoes?.length) {
+      return {
+        sugestoes:this._filtrarSugestoesTeste(registro.sugestoes).slice(0,3),
+        origem:"Sugestões oficiais salvas quando esta partida chegou à vez",
+        analise:registro.analise || ""
+      };
+    }
+    // Nunca recalcula um palpite depois do placar. Se não houve registro oficial,
+    // a tela assume isso claramente em vez de trocar mercado retroativamente.
+    return {
+      sugestoes:[],
+      origem:"Sem sugestão oficial salva para esta partida",
+      analise:"O sistema não recalcula sugestões depois do resultado. GREEN/RED existe somente para sugestões que foram salvas como oficiais antes do placar final."
+    };
+  };
+
+  Interface._avaliarSugestaoResultadoTeste = function (s, r) {
+    if (!s || !r) return null;
+    const k = String(s.k || s.mercado || "");
+    const valor = String(s.valor ?? "").toUpperCase();
+    let casa = Number(r.golsCasa), fora = Number(r.golsFora), total = Number(r.totalGols);
+    if (!Number.isFinite(casa) || !Number.isFinite(fora)) {
+      const m = String(r.placar || "").match(/^(\d+)\s*x\s*(\d+)$/i);
+      if (m) { casa = Number(m[1]); fora = Number(m[2]); total = casa + fora; }
+    }
+    if (!Number.isFinite(casa) || !Number.isFinite(fora) || !Number.isFinite(total)) return null;
+    if (k === "exato") return String(s.valor) === String(r.placar);
+    if (k === "gols") return Number(s.valor) === 5 ? total >= 5 : Number(s.valor) === total;
+    if (k === "r12") return (valor === "1" && casa > fora) || (valor === "X" && casa === fora) || (valor === "2" && casa < fora);
+    if (k === "bm") return (valor === "SIM") === (casa > 0 && fora > 0);
+    const linha = ({ou05:0.5,under05:0.5,ou15:1.5,ou25:2.5,ou35:3.5,over35:3.5})[k];
+    if (linha != null) return valor === "MAIS" ? total > linha : valor === "MENOS" ? total < linha : null;
+    return null;
+  };
+
+  // Escudos: usa SOMENTE o catálogo/IDs e as mesmas fontes de imagem
+  // definidos no projeto IA COLETORA enviado pelo usuário. Nenhuma outra
+  // lógica daquele projeto foi importada.
+  Interface._escudoIdTeste = function (nome) {
+    const n = String(nome || "").trim().toLowerCase();
+    const mapa = [
+      [/^arsenal$|^arsenal fc$|^islington$/, 42],
+      [/^aston$|^aston villa$|^aston vila$/, 66],
+      [/^bournemouth$|^afc bournemouth$/, 35],
+      [/^brentford$|^brentford fc$/, 55],
+      [/^brighton$|^brighton fc$|^brighton & hove albion$/, 51],
+      [/^burnley$|^burnley fc$/, 44],
+      [/^chelsea$|^chelsea fc$/, 49],
+      [/^city$|^manchester city$|^man city$/, 50],
+      [/^crystal palace$|^palace$|^crystal palace fc$/, 52],
+      [/^everton$|^everton fc$/, 45],
+      [/^fulham$|^fulham fc$/, 36],
+      [/^leeds$|^leeds fc$|^leeds united$/, 63],
+      [/^leicester$|^leicester city$/, 46],
+      [/^liverpool$|^liverpool fc$/, 40],
+      [/^newcastle$|^newcastle united$/, 34],
+      [/^norwich$|^norwich city$|^norwich city fc$/, 71],
+      [/^nottingham$|^nottingham forest$/, 65],
+      [/^southampton$|^southampton fc$/, 41],
+      [/^tottenham$|^tottenham hotspur$|^spurs$/, 47],
+      [/^united$|^man utd$|^manchester utd$|^manchester united$/, 33],
+      [/^watford$|^watford fc$/, 38],
+      [/^west ham$|^west ham fc$|^west ham united$/, 48],
+      [/^wolves$|^wolverhampton$|^wolverhampton wanderers$/, 39]
+    ];
+    for (const [rx, id] of mapa) if (rx.test(n)) return id;
+    return null;
+  };
+
+  Interface._fontesEscudoFixasTeste = new Map();
+
+  Interface._fontesEscudoTeste = function (nome) {
+    const id = this._escudoIdTeste(nome);
+    if (!id) return [];
+    const cachePronto = typeof TesteEscudosCache !== "undefined" && TesteEscudosCache.tem(id);
+    if (this._fontesEscudoFixasTeste.has(id)) {
+      const fixas = [...this._fontesEscudoFixasTeste.get(id)];
+      return cachePronto ? [TesteEscudosCache.url(id), ...fixas.filter(x => x !== TesteEscudosCache.url(id))] : fixas;
+    }
+
+    // Estes são os PNGs que realmente existem fisicamente dentro da pasta
+    // teste/escudos. Para os demais NÃO tentamos arquivo local inexistente,
+    // evitando o ícone de arquivo quebrado/piscando.
+    const idsLocais = new Set([42, 44, 47, 48, 49, 50, 52, 63, 71]);
+    const fontes = [];
+    if (idsLocais.has(id)) fontes.push(`./escudos/${id}.png`);
+
+    const n = String(nome || "").trim().toLowerCase();
+    if (/^watford$|^watford fc$/.test(n)) {
+      fontes.push(
+        "https://assets.footylogos.com/logos/watford/watford-logo-footylogos.png",
+        "https://media.api-sports.io/football/teams/38.png"
+      );
+    } else if (/^crystal palace$|^palace$|^crystal palace fc$/.test(n)) {
+      fontes.push(
+        "https://assets.football-logos.cc/logos/england/1500x1500/crystal-palace.e3552a3a.png",
+        "https://assets.footylogos.com/logos/crystal-palace/crystal-palace-logo-footylogos.png",
+        "https://media.api-sports.io/football/teams/52.png"
+      );
+    } else if (/^norwich$|^norwich city$|^norwich city fc$/.test(n)) {
+      fontes.push(
+        "https://www.footylogos.com/downloads/logo/norwich-city-logo-footylogos.png",
+        "https://media.api-sports.io/football/teams/71.png"
+      );
+    } else {
+      fontes.push(`https://media.api-sports.io/football/teams/${id}.png`);
+    }
+
+    const unicas = [...new Set(fontes)];
+    this._fontesEscudoFixasTeste.set(id, unicas);
+    return cachePronto ? [TesteEscudosCache.url(id), ...unicas.filter(x => x !== TesteEscudosCache.url(id))] : [...unicas];
+  };
+
+  Interface._trocarFonteEscudoTeste = function (img) {
+    if (!img) return;
+    let fontes = [];
+    try { fontes = JSON.parse(decodeURIComponent(img.dataset.fontes || "%5B%5D")); } catch (_) {}
+    if (fontes.length) {
+      const proxima = fontes.shift();
+      img.dataset.fontes = encodeURIComponent(JSON.stringify(fontes));
+      img.src = proxima;
+      return;
+    }
+    const cls = img.className || "teste-team-logo";
+    const span = document.createElement("span");
+    span.className = `${cls} teste-team-missing`;
+    span.textContent = "?";
+    img.replaceWith(span);
+  };
+
+  Interface._brasaoTeste = function (_url, nome, lado, mini = false) {
+    const fontes = this._fontesEscudoTeste(nome);
+    const classe = `teste-team-logo${mini ? " mini" : ""}`;
+    if (!fontes.length) return `<span class="${classe} teste-team-missing">?</span>`;
+    const primeira = fontes.shift();
+    const restantes = encodeURIComponent(JSON.stringify(fontes));
+    const id = this._escudoIdTeste(nome);
+    return `<img class="${classe}" src="${esc(primeira)}" data-fontes="${esc(restantes)}" alt="${esc(nome || lado)}" loading="eager" decoding="async" onload="if(window.TesteEscudosCache)TesteEscudosCache.salvarVisto(this,${Number(id) || 0})" onerror="Interface._trocarFonteEscudoTeste(this)">`;
+  };
+
+  Interface._nomePartidaTeste = function (meta) {
+    if (meta?.mandante && meta?.visitante) return `<span class="teste-team-inline">${this._brasaoTeste(meta?.escudoMandante, meta.mandante, "Mandante", true)}<strong>${esc(meta.mandante)}</strong></span><span class="teste-x">x</span><span class="teste-team-inline">${this._brasaoTeste(meta?.escudoVisitante, meta.visitante, "Visitante", true)}<strong>${esc(meta.visitante)}</strong></span>`;
+    return `<span class="teste-await-inline">${AGUARDA}</span>`;
+  };
+
+  Interface._metaResultadoTeste = function (r) {
+    const data = r?._temporal?.data || r?.dataPartida || "";
+    const horario = r?._temporal?.horario || r?.horario || "";
+    if (!horario) return null;
+
+    // Primeiro usa os próprios times gravados junto do resultado no Firebase.
+    // Isso permite montar "Últimas entradas" mesmo depois de limpar o
+    // navegador ou abrir o painel quando aquela partida já saiu da agenda.
+    const mandanteDireto = String(r?.mandante ?? r?.casa ?? r?.home?.name ?? r?.home ?? r?.timeCasa ?? "").trim();
+    const visitanteDireto = String(r?.visitante ?? r?.fora ?? r?.away?.name ?? r?.away ?? r?.timeFora ?? "").trim();
+    if (mandanteDireto && visitanteDireto) {
+      return {
+        data, horario,
+        liga: r?.liga || r?.competicao || "Inglês Doméstico (Esportes Virtuais)",
+        mandante: mandanteDireto,
+        visitante: visitanteDireto,
+        escudoMandante: r?.escudoMandante || r?.escudoCasa || r?.homeLogo || r?.home?.logo || "",
+        escudoVisitante: r?.escudoVisitante || r?.escudoFora || r?.awayLogo || r?.away?.logo || "",
+        _origem: "historico_compartilhado"
+      };
+    }
+
+    const candidatos = [];
+
+    try {
+      if (typeof TesteProximasPartidas !== "undefined") {
+        if (data) {
+          const atual = TesteProximasPartidas.obterPartida({ data, horario });
+          if (atual) return atual;
+        }
+        const snap = typeof TesteProximasPartidas.snapshot === "function"
+          ? TesteProximasPartidas.snapshot()
+          : [];
+        if (Array.isArray(snap)) candidatos.push(...snap);
+      }
+    } catch (_) {}
+
+    try {
+      const cache = JSON.parse(localStorage.getItem("vai_na_fe_partidas_coletadas_base_zerada_v1") || "{}");
+      candidatos.push(...Object.values(cache || {}));
+      if (data && cache[`${data}|${horario}`]) return cache[`${data}|${horario}`];
+    } catch (_) {}
+
+    const limpos = candidatos.filter(x => x && x.horario && x.mandante && x.visitante);
+    const iguais = limpos.filter(x => String(x.horario) === String(horario));
+    if (!iguais.length) return null;
+
+    const alvoData = data ? Date.parse(`${data}T00:00:00`) : NaN;
+    iguais.sort((a, b) => {
+      const aMesmoDia = data && a.data === data ? 0 : 1;
+      const bMesmoDia = data && b.data === data ? 0 : 1;
+      if (aMesmoDia !== bMesmoDia) return aMesmoDia - bMesmoDia;
+
+      const aTempo = a.data ? Date.parse(`${a.data}T00:00:00`) : NaN;
+      const bTempo = b.data ? Date.parse(`${b.data}T00:00:00`) : NaN;
+      const aDiff = Number.isFinite(alvoData) && Number.isFinite(aTempo) ? Math.abs(aTempo - alvoData) : Number.MAX_SAFE_INTEGER;
+      const bDiff = Number.isFinite(alvoData) && Number.isFinite(bTempo) ? Math.abs(bTempo - alvoData) : Number.MAX_SAFE_INTEGER;
+      if (aDiff !== bDiff) return aDiff - bDiff;
+
+      return `${b.data || ""}|${b.horario || ""}`.localeCompare(`${a.data || ""}|${a.horario || ""}`);
+    });
+
+    return iguais[0] || null;
+  };
+
+  Interface._nomeCompletoTimeTeste = function (nome) {
+    const bruto = String(nome || "").trim();
+    if (!bruto) return "—";
+    let n = bruto.toLowerCase();
+    try {
+      if (typeof AnaliseContextualTimes !== "undefined" && typeof AnaliseContextualTimes._normTime === "function")
+        n = AnaliseContextualTimes._normTime(bruto);
+    } catch (_) {}
+    const nomes = {
+      "arsenal":"Arsenal", "aston villa":"Aston Villa", "bournemouth":"Bournemouth",
+      "brentford":"Brentford", "brighton":"Brighton", "burnley":"Burnley",
+      "chelsea":"Chelsea", "manchester city":"Manchester City", "crystal palace":"Crystal Palace",
+      "everton":"Everton", "fulham":"Fulham", "leeds":"Leeds", "leicester":"Leicester",
+      "liverpool":"Liverpool", "newcastle":"Newcastle", "norwich":"Norwich",
+      "nottingham":"Nottingham Forest", "southampton":"Southampton", "tottenham":"Tottenham",
+      "manchester united":"Manchester United", "watford":"Watford", "west ham":"West Ham",
+      "wolverhampton":"Wolverhampton"
+    };
+    return nomes[n] || bruto;
+  };
+
+  Interface._confrontosDiretosHistoricoTeste = function (resultados, meta, limite = 10) {
+    if (!meta?.mandante || !meta?.visitante) return [];
+    const norm = nome => {
+      try {
+        if (typeof AnaliseContextualTimes !== "undefined" && typeof AnaliseContextualTimes._normTime === "function")
+          return AnaliseContextualTimes._normTime(nome);
+      } catch (_) {}
+      return String(nome || "").trim().toLowerCase();
+    };
+    const a = norm(meta.mandante), b = norm(meta.visitante);
+    const lista = (resultados || []).filter(r => {
+      if (!r?.mandante || !r?.visitante || !r?.placar) return false;
+      const x = norm(r.mandante), y = norm(r.visitante);
+      return (x === a && y === b) || (x === b && y === a);
+    }).sort((x,y) => {
+      const kx = `${x?._temporal?.data || x?.data || ""}|${x?._temporal?.horario || x?.horario || ""}`;
+      const ky = `${y?._temporal?.data || y?.data || ""}|${y?._temporal?.horario || y?.horario || ""}`;
+      return ky.localeCompare(kx);
+    });
+    const n = Math.max(1, Number(limite) || 10);
+    return lista.slice(0, n);
+  };
+
+  Interface._temMinimoConfrontosTeste = function () {
+    // Compatibilidade com versões anteriores: H2H não bloqueia mais sugestões.
+    return true;
+  };
+
+  Interface._ultimosDosTimesTeste = function (resultados, meta, limite = 5) {
+    if (!meta?.mandante || !meta?.visitante) return [];
+    const norm = nome => {
+      try { return AnaliseContextualTimes._normTime(nome); } catch (_) { return String(nome || "").trim().toLowerCase(); }
+    };
+    const a = norm(meta.mandante), b = norm(meta.visitante);
+    return (resultados || []).filter(r => {
+      const x = norm(r?.mandante), y = norm(r?.visitante);
+      return r?.placar && (x === a || y === a || x === b || y === b);
+    }).slice(-Math.max(1, Number(limite) || 5)).reverse();
+  };
+
+  Interface._ultimosCasaVisitanteTeste = function (resultados, meta, limite = 10) {
+    if (!meta?.mandante || !meta?.visitante) return { casa: [], visitante: [] };
+    const norm = nome => {
+      try { return AnaliseContextualTimes._normTime(nome); } catch (_) { return String(nome || "").trim().toLowerCase(); }
+    };
+    const casaAlvo = norm(meta.mandante);
+    const visitanteAlvo = norm(meta.visitante);
+    const validos = (resultados || []).filter(r => r?.placar && r?.mandante && r?.visitante);
+    const n = Math.max(1, Number(limite) || 10);
+    return {
+      // Forma do mandante somente quando ele realmente jogou em casa.
+      casa: validos.filter(r => norm(r.mandante) === casaAlvo).slice(-n).reverse(),
+      // Forma do visitante somente quando ele realmente jogou fora.
+      visitante: validos.filter(r => norm(r.visitante) === visitanteAlvo).slice(-n).reverse()
+    };
+  };
+
+  Interface._htmlUltimosCasaVisitanteTeste = function (lista, timeAlvo, lado) {
+    const itens = Array.isArray(lista) ? lista : [];
+    const alvo = this._nomeCompletoTimeTeste(timeAlvo || "");
+    if (!itens.length) return `<div class="teste-form-empty">Nenhum jogo anterior de ${esc(alvo || "este time")} nesta condição.</div>`;
+    const norm = nome => {
+      try { return AnaliseContextualTimes._normTime(nome); } catch (_) { return String(nome || "").trim().toLowerCase(); }
+    };
+    const alvoNorm = norm(timeAlvo);
+    return itens.map(r => {
+      const mandante = this._nomeCompletoTimeTeste(r?.mandante);
+      const visitante = this._nomeCompletoTimeTeste(r?.visitante);
+      const m = String(r?.placar || "").match(/^(\d+)\s*x\s*(\d+)$/i);
+      const placar = m ? `${m[1]} x ${m[2]}` : String(r?.placar || "—");
+      const data = r?._temporal?.data || r?.data || r?.dataPartida || "";
+      const hora = r?._temporal?.horario || r?.horario || "";
+      const casaAlvo = norm(r?.mandante) === alvoNorm;
+      const foraAlvo = norm(r?.visitante) === alvoNorm;
+      return `<div class="teste-form-row ${esc(lado || "")}">
+        <span class="teste-form-time casa ${casaAlvo ? "alvo" : ""}">${esc(mandante || "—")}</span>
+        <b class="teste-form-score">${esc(placar)}</b>
+        <span class="teste-form-time fora ${foraAlvo ? "alvo" : ""}">${esc(visitante || "—")}</span>
+        <small>${esc([data, hora].filter(Boolean).join(" · "))}</small>
+      </div>`;
+    }).join("");
+  };
+
+  Interface._htmlConfrontosTeste = function (lista) {
+    const total = Array.isArray(lista) ? lista.length : 0;
+    const nivel = total === 0 ? "SEM PESO H2H" : total <= 2 ? "PESO LEVE" : total <= 5 ? "PESO MÉDIO" : "PESO FORTE";
+    const cab = `<div class="teste-h2h-progresso"><b>${total} confronto${total === 1 ? "" : "s"}</b><span>${nivel}</span></div>`;
+    if (!total) return `${cab}<div class="teste-h2h-row vazio"><span>Nenhum confronto anterior entre estes times. A IA usa os outros fatores normalmente.</span></div>`;
+    const linhas = lista.map(x => {
+      const casa = this._nomeCompletoTimeTeste(x?.mandante);
+      const fora = this._nomeCompletoTimeTeste(x?.visitante);
+      const m = String(x?.placar || "").match(/^(\d+)\s*x\s*(\d+)$/i);
+      const placar = m ? `${m[1]} x ${m[2]}` : String(x?.placar || "—");
+      const data = x?._temporal?.data || x?.data || "";
+      const hora = x?._temporal?.horario || x?.horario || "";
+      return `<div class="teste-h2h-row">
+        <span class="teste-h2h-time casa">${esc(casa)}</span>
+        <b class="teste-h2h-score">${esc(placar)}</b>
+        <span class="teste-h2h-time fora">${esc(fora)}</span>
+        <small>${esc([data,hora].filter(Boolean).join(" · "))}</small>
+      </div>`;
+    }).join("");
+    return cab + linhas;
+  };
+
+  Interface._ultimasEntradasTeste = function (d) {
+    const resultados = (d.resultados || [])
+      .map((r, indice) => ({r, indice}))
+      .filter(x => x.r?.placar && x.r?._temporal?.horario)
+      .slice(-5).reverse();
+    if (!resultados.length) return `<div class="teste-empty">${AGUARDA}</div>`;
+
+    return resultados.map(({r, indice}) => {
+      const meta = this._metaResultadoTeste(r);
+      const horario = r?._temporal?.horario || "--:--";
+      const placar = r?.placar || "—";
+      const chave = this._chaveResultadoTeste(r, indice);
+      const selecionado = chave === this._resultadoSelecionadoTeste;
+      const partida = meta?.mandante && meta?.visitante
+        ? `<span class="teste-team-inline">${this._brasaoTeste(meta.escudoMandante, meta.mandante, "Mandante", true)}<strong>${esc(meta.mandante)}</strong></span><span class="teste-result-score">${esc(placar)}</span><span class="teste-team-inline">${this._brasaoTeste(meta.escudoVisitante, meta.visitante, "Visitante", true)}<strong>${esc(meta.visitante)}</strong></span>`
+        : `<span class="teste-result-await">Times ainda não associados pelo coletor</span><span class="teste-result-score">${esc(placar)}</span>`;
+
+      return `<button class="teste-match-row teste-result-row ${selecionado ? "selecionado" : ""}" data-teste-resultado="${esc(chave)}">
+        <div class="teste-row-time"><span>REGISTRADA</span><b>${esc(horario)}</b></div>
+        <div class="teste-league"><i>⚽</i><small>${esc(meta?.liga || "Inglês Doméstico (Esportes Virtuais)")}</small></div>
+        <div class="teste-result-match">${partida}</div>
+        <em class="teste-status neutro">VER ANÁLISE</em>
+      </button>`;
+    }).join("");
+  };
+
+  Interface._detalhesResultadoHistoricoTeste = function (d, r, indice) {
+    const meta = this._metaResultadoTeste(r) || {};
+    const horario = r?._temporal?.horario || r?.horario || "--:--";
+    const data = r?._temporal?.data || r?.dataPartida || r?.data || "";
+    const mandante = meta?.mandante || AGUARDA;
+    const visitante = meta?.visitante || AGUARDA;
+    const anteriores = (d.resultados || []).slice(0, Math.max(0, indice));
+    const h2h = this._confrontosDiretosHistoricoTeste(anteriores, meta, 10);
+    const hist = this._sugestoesHistoricasResultadoTeste(d, r, indice, meta);
+    const sugestoes = hist.sugestoes || [];
+    const principal = sugestoes[0] || null;
+    const sugestoesHtml = sugestoes.length ? sugestoes.map((s, i) => {
+      const acertou = this._avaliarSugestaoResultadoTeste(s, r);
+      const status = acertou === true ? `<em class="teste-status green">GREEN</em>` : acertou === false ? `<em class="teste-status red">RED</em>` : `<em class="teste-status neutro">REGISTRADA</em>`;
+      return `<div class="teste-suggestion-row">
+        <span class="teste-suggestion-number">${i + 1}</span>
+        <div><b>${esc(this._tituloIndividualSugestaoTeste(s))}</b>${s.descricao ? `<small>${esc(s.descricao)}</small>` : ""}</div>
+        <div class="teste-conf"><small>CONFIANÇA</small><b>${pct(s.confianca)}</b></div>
+        ${status}
+      </div>`;
+    }).join("") : `<div class="teste-empty">Nenhuma sugestão registrada para esta partida.</div>`;
+
+    const forma = this._ultimosCasaVisitanteTeste(anteriores, meta, 10);
+    const casaHtml = this._htmlUltimosCasaVisitanteTeste(forma.casa, mandante, "casa");
+    const visitanteHtml = this._htmlUltimosCasaVisitanteTeste(forma.visitante, visitante, "visitante");
+    const h2hHtml = this._htmlConfrontosTeste(h2h);
+
+    return `<section class="ia-card teste-panel teste-details">
+      <div class="teste-detail-head"><h2>DETALHES DA ENTRADA</h2><span>PARTIDA REGISTRADA</span></div>
+      <div class="teste-league-title">⚽ ${esc(meta?.liga || "Inglês Doméstico (Esportes Virtuais)")}</div>
+      <div class="teste-match-hero">
+        <div class="teste-team teste-team-side">${this._brasaoTeste(meta?.escudoMandante, mandante, "Mandante")}<b>${esc(mandante)}</b></div>
+        <div class="teste-kickoff"><b>${esc(r?.placar || "—")}</b><small>${esc(data)} · ${esc(horario)}</small><span>FINAL</span></div>
+        <div class="teste-team teste-team-side">${this._brasaoTeste(meta?.escudoVisitante, visitante, "Visitante")}<b>${esc(visitante)}</b></div>
+      </div>
+      <div class="teste-best-market">
+        <div class="teste-best-title"><span>▥</span><div><small>MERCADO MAIS INDICADO NAQUELE JOGO</small><b>${esc(principal ? this._tituloIndividualSugestaoTeste(principal) : AGUARDA)}</b><p>${esc(principal?.descricao || hist.origem || "Sem sugestão registrada.")}</p></div></div>
+        <div class="teste-best-metrics"><div><small>CONFIANÇA</small><b>${pct(principal?.confianca)}</b></div></div>
+      </div>
+      <div class="teste-section-title">SUGESTÕES DOS ESPECIALISTAS NAQUELE JOGO (${sugestoes.length})</div>
+      <div class="teste-suggestion-list">${sugestoesHtml}</div>
+      <div class="teste-analysis"><b>▤ REGISTRO DA ANÁLISE</b><p>${esc(hist.analise || hist.origem || "Sugestões anteriores ao resultado.")}</p><small>${esc(hist.origem || "")}</small></div>
+      <div class="teste-bottom-details teste-bottom-form">
+        <div class="teste-form-box"><div class="teste-form-head"><h3>ÚLTIMOS JOGOS CASA</h3><b>${esc(this._nomeCompletoTimeTeste(mandante))}</b><span>${forma.casa.length}/10</span></div><div class="teste-form-list">${casaHtml}</div></div>
+        <div class="teste-form-box"><div class="teste-form-head"><h3>ÚLTIMOS JOGOS VISITANTE</h3><b>${esc(this._nomeCompletoTimeTeste(visitante))}</b><span>${forma.visitante.length}/10</span></div><div class="teste-form-list">${visitanteHtml}</div></div>
+        <div class="teste-h2h-box"><h3>CONFRONTO DIRETO</h3><div class="teste-h2h">${h2hHtml}</div></div>
+      </div>
+    </section>`;
+  };
+
+  Interface._pagina_entradas = function (d) {
+    const slots = this._slotsEntradasTeste(d);
+    // Somente a primeira partida da fila pode virar OFICIAL. As demais
+    // continuam como prévias dinâmicas e nunca são gravadas.
+    this._garantirSugestaoOficialAtualTeste(d, slots);
+
+    const resultadosComIndice = (d.resultados || []).map((r, indice) => ({r, indice}));
+    const historicoSelecionado = this._resultadoSelecionadoTeste
+      ? resultadosComIndice.find(x => this._chaveResultadoTeste(x.r, x.indice) === this._resultadoSelecionadoTeste)
+      : null;
+    if (this._resultadoSelecionadoTeste && !historicoSelecionado) this._resultadoSelecionadoTeste = null;
+
+    const painelUltimas = `<div class="ia-card teste-panel teste-last-panel">
+      <div class="teste-panel-head"><div><h2>◷ ÚLTIMAS ENTRADAS</h2><p>Partidas já registradas com horário, times, escudos e placar. Clique para rever as sugestões daquele jogo.</p></div><span>⌄</span></div>
+      <div>${this._ultimasEntradasTeste(d)}</div>
+    </div>`;
+
+    if (!slots.length) {
+      const detalhes = historicoSelecionado
+        ? this._detalhesResultadoHistoricoTeste(d, historicoSelecionado.r, historicoSelecionado.indice)
+        : `<section class="ia-card teste-panel teste-details teste-details-empty"><div class="teste-detail-head"><h2>DETALHES DA ENTRADA</h2><span>SEM PARTIDA</span></div><div class="teste-no-selection"><b>Nenhuma partida selecionada</b><small>Você também pode clicar em uma das últimas entradas para rever as sugestões daquele jogo.</small></div></section>`;
+      return `<div class="teste-entradas-grid">
+        <section class="teste-left-column">
+          <div class="ia-card teste-panel teste-suggestions-panel">
+            <div class="teste-panel-head"><div><h2>★ SUGESTÕES DE ENTRADA</h2><p>Próximas partidas em ordem de horário. Clique em uma para ver a análise completa.</p></div><span>⌄</span></div>
+            <div class="teste-no-upcoming"><b>Nenhuma próxima partida registrada</b><small>O coletor ainda não cadastrou uma nova partida em /proximas_partidas.</small></div>
+          </div>
+          ${painelUltimas}
+        </section>
+        ${detalhes}
+      </div>`;
+    }
+
+    const selecionadaExiste = slots.some(s => `${s.data}|${s.horario}` === this._partidaSelecionadaTeste);
+    if (!selecionadaExiste) this._partidaSelecionadaTeste = `${slots[0].data}|${slots[0].horario}`;
+    const slotSelecionado = slots.find(s => `${s.data}|${s.horario}` === this._partidaSelecionadaTeste) || slots[0];
+    const metaSelecionado = this._metaPartidaTeste(slotSelecionado);
+
+    const slotOficial = this._partidaAtualOficialTeste(slots, d.resultados || []);
+    const chaveOficial = slotOficial ? `${slotOficial.data}|${slotOficial.horario}` : "";
+    const chaveSelecionada = `${slotSelecionado.data}|${slotSelecionado.horario}`;
+    const registroOficialSelecionado = chaveSelecionada === chaveOficial
+      ? this._obterSnapshotSugestoesTeste(slotSelecionado)
+      : null;
+
+    // A selecionada sempre pode ser analisada agora. Se for FUTURA, este valor é
+    // apenas uma PRÉVIA e pode mudar a cada novo resultado. Se a partida atual já
+    // tem sugestões oficiais salvas, NÃO recalculamos nada para ela: mostramos o
+    // registro imutável e poupamos processamento.
+    const selecionadaEhOficial = Boolean(
+      chaveSelecionada === chaveOficial &&
+      registroOficialSelecionado?.status === "oficial" &&
+      registroOficialSelecionado?.sugestoes?.length
+    );
+    const sugestoesCalculadas = selecionadaEhOficial ? [] : this._sugestoesEntradasTeste(d, metaSelecionado);
+    const contextoCalculadoSelecionado = selecionadaEhOficial ? null : this._ultimaAnaliseContextualTeste;
+    const sugestoes = selecionadaEhOficial
+      ? this._filtrarSugestoesTeste(registroOficialSelecionado.sugestoes).slice(0,3)
+      : this._filtrarSugestoesTeste(sugestoesCalculadas).slice(0,3);
+    const principal = sugestoes[0] || null;
+
+    const lista = slots.map((slot, i) => {
+      const meta = this._metaPartidaTeste(slot);
+      const chave = `${slot.data}|${slot.horario}`;
+      const labels = ["PARTIDA ATUAL", "PRÓXIMA PARTIDA", "DAQUI A 2 JOGOS", "DAQUI A 3 JOGOS", "DAQUI A 4 JOGOS"];
+      const ehOficial = chave === chaveOficial;
+      const registro = ehOficial ? this._obterSnapshotSugestoesTeste(slot) : null;
+      const selecionado = !this._resultadoSelecionadoTeste && chave === this._partidaSelecionadaTeste;
+      const qtd = registro?.sugestoes?.length
+        ? this._filtrarSugestoesTeste(registro.sugestoes).slice(0,3).length
+        : (selecionado ? sugestoes.length : null);
+      const rotuloContagem = ehOficial && registro?.sugestoes?.length
+        ? "oficiais"
+        : (selecionado ? "prévia" : "prévia");
+      return `<button class="teste-match-row ${selecionado ? "selecionado" : ""}" data-teste-partida="${esc(chave)}">
+        <div class="teste-row-time"><span>${labels[i] || "PRÓXIMO JOGO"}</span><b>${esc(slot.horario)}</b></div>
+        <div class="teste-league"><i>⚽</i><small>${esc(meta?.liga || "Inglês Doméstico (Esportes Virtuais)")}</small></div>
+        <div class="teste-teams-line">${this._nomePartidaTeste(meta)}</div>
+        <div class="teste-count"><b>${qtd == null ? "—" : qtd}</b><small>${rotuloContagem}</small></div>
+        <span class="teste-chevron">›</span>
+      </button>`;
+    }).join("");
+
+    let detalhes;
+    if (historicoSelecionado) {
+      detalhes = this._detalhesResultadoHistoricoTeste(d, historicoSelecionado.r, historicoSelecionado.indice);
+    } else {
+      const mandante = metaSelecionado?.mandante || AGUARDA;
+      const visitante = metaSelecionado?.visitante || AGUARDA;
+      const ctxAtual = contextoCalculadoSelecionado || this._ultimaAnaliseContextualTeste;
+      const h2h = this._confrontosDiretosHistoricoTeste(d.resultados || [], metaSelecionado, 10);
+      const analise = (selecionadaEhOficial ? registroOficialSelecionado?.analise : "") ||
+        (ctxAtual?.disponivel
+          ? (ctxAtual.leituraConfronto || ctxAtual.resumo)
+          : (metaSelecionado?.analise || principal?.descricao || "Calculando o contexto do confronto com os dados disponíveis; H2H é apenas um dos pesos."));
+      const estadoSugestao = selecionadaEhOficial ? "OFICIAL — SALVA PARA ESTE JOGO" : "PRÉVIA — PODE MUDAR";
+      const tituloSugestoes = selecionadaEhOficial ? "3 SUGESTÕES OFICIAIS" : "3 SUGESTÕES — PRÉVIA DINÂMICA";
+      const forma = this._ultimosCasaVisitanteTeste(d.resultados || [], metaSelecionado, 10);
+      const under35Fixo = this._under35FixoTeste(d);
+      const under35FixoHtml = `<div class="teste-under35-fixo ${under35Fixo.ativo ? "ativo" : "silencioso"}"><div><small>U3.5 FIXO · FORA DAS 3 SUGESTÕES</small><b>${esc(under35Fixo.titulo)}</b><p>${esc(under35Fixo.descricao)}</p></div><div class="teste-under35-status"><span>${esc(under35Fixo.status)}</span><b>${under35Fixo.ativo ? pct(under35Fixo.confianca) : "—"}</b></div></div>`;
+      const sugestoesHtml = sugestoes.length ? sugestoes.map((s, i) => `<div class="teste-suggestion-row">
+        <span class="teste-suggestion-number">${i + 1}</span>
+        <div><b>${esc(this._tituloIndividualSugestaoTeste(s))}</b>${s.descricao ? `<small>${esc(s.descricao)}</small>` : ""}</div>
+        <div class="teste-conf"><small>CONFIANÇA</small><b>${pct(s.confianca)}</b></div>
+        <em class="${s.principal ? "principal" : "alternativa"}">${s.principal ? "PRINCIPAL" : "ALTERNATIVA"}${s.forca ? ` · ${esc(s.forca)}` : ""}</em>
+      </div>`).join("") : `<div class="teste-empty">${AGUARDA}</div>`;
+      const casaHtml = this._htmlUltimosCasaVisitanteTeste(forma.casa, mandante, "casa");
+      const visitanteHtml = this._htmlUltimosCasaVisitanteTeste(forma.visitante, visitante, "visitante");
+      const h2hHtml = this._htmlConfrontosTeste(h2h);
+
+      detalhes = `<section class="ia-card teste-panel teste-details">
+        <div class="teste-detail-head"><h2>DETALHES DA ENTRADA</h2><span>${esc(estadoSugestao)}</span></div>
+        <div class="teste-league-title">⚽ ${esc(metaSelecionado?.liga || "Inglês Doméstico (Esportes Virtuais)")}</div>
+        <div class="teste-match-hero">
+          <div class="teste-team teste-team-side">${this._brasaoTeste(metaSelecionado?.escudoMandante, mandante, "Mandante")}<b>${esc(mandante)}</b></div>
+          <div class="teste-kickoff"><b>${esc(slotSelecionado.horario)}</b><small>${esc(slotSelecionado.data)}</small><span>×</span></div>
+          <div class="teste-team teste-team-side">${this._brasaoTeste(metaSelecionado?.escudoVisitante, visitante, "Visitante")}<b>${esc(visitante)}</b></div>
+        </div>
+        <div class="teste-best-market">
+          <div class="teste-best-title"><span>▥</span><div><small>MERCADO MAIS INDICADO (IA)</small><b>${esc(principal ? this._tituloIndividualSugestaoTeste(principal) : AGUARDA)}</b><p>${esc(principal?.descricao || "Calculando o melhor mercado da base limpa. O confronto direto entra como peso, sem bloquear a análise.")}</p></div></div>
+          <div class="teste-best-metrics"><div><small>CONFIANÇA</small><b>${pct(principal?.confianca)}</b></div></div>
+        </div>
+        ${under35FixoHtml}
+        <div class="teste-section-title">${esc(tituloSugestoes)} (${sugestoes.length})</div>
+        <div class="teste-suggestion-list">${sugestoesHtml}</div>
+        <div class="teste-analysis"><b>▤ ANÁLISE DA IA</b><p>${esc(analise)}</p></div>
+        <div class="teste-bottom-details teste-bottom-form">
+          <div class="teste-form-box"><div class="teste-form-head"><h3>ÚLTIMOS JOGOS CASA</h3><b>${esc(this._nomeCompletoTimeTeste(mandante))}</b><span>${forma.casa.length}/10</span></div><div class="teste-form-list">${casaHtml}</div></div>
+          <div class="teste-form-box"><div class="teste-form-head"><h3>ÚLTIMOS JOGOS VISITANTE</h3><b>${esc(this._nomeCompletoTimeTeste(visitante))}</b><span>${forma.visitante.length}/10</span></div><div class="teste-form-list">${visitanteHtml}</div></div>
+          <div class="teste-h2h-box"><h3>CONFRONTO DIRETO</h3><div class="teste-h2h">${h2hHtml}</div></div>
+        </div>
+      </section>`;
+    }
+
+    return `<div class="teste-entradas-grid">
+      <section class="teste-left-column">
+        <div class="ia-card teste-panel teste-suggestions-panel">
+          <div class="teste-panel-head"><div><h2>★ SUGESTÕES DE ENTRADA</h2><p>Próximas partidas em ordem de horário. Clique em uma para ver a análise completa.</p></div><span>⌄</span></div>
+          <div class="teste-match-list">${lista}</div>
+        </div>
+        ${painelUltimas}
+      </section>
+      ${detalhes}
+    </div>`;
+  };
+
+  Interface._pagina_configuracoes = function (d) {
+    const base = originalConfig(d);
+    const cfg = typeof TesteProximasPartidas !== "undefined" ? TesteProximasPartidas.config() : {caminhoPartidas:"proximas_partidas"};
+    const st = typeof TesteProximasPartidas !== "undefined" ? TesteProximasPartidas.status() : {estado:"indisponivel",erro:"",quantidade:0};
+    const principal = typeof TesteProximasPartidas !== "undefined" ? TesteProximasPartidas.firebasePrincipal() : "";
+    return `${base}<section class="ia-setting teste-firebase-setting"><div><span>◉</span><div><h2>Próximas partidas — mesmo Firebase</h2><p>O histórico continua em /historico_compartilhado. Esta camada lê somente a agenda do programa e nunca transforma esses dados em resultado.</p></div></div><div>
+      <label>Firebase atual <b class="teste-url-readonly">${esc(principal || "Não identificado")}</b></label>
+      <label>Caminho das próximas partidas <input id="teste-proximas-path" type="text" value="${esc(cfg.caminhoPartidas)}"></label>
+      <button id="teste-proximas-save" class="ia-outline-btn">Salvar caminho no modo teste</button>
+      <small class="teste-fb-status ${esc(st.estado)}">Status: ${esc(st.estado)} · ${Number(st.quantidade || 0)} partida(s) lida(s)${st.erro ? ` · ${esc(st.erro)}` : ""}</small>
+    </div></section>`;
+  };
+
+  Interface._eventosPaginaModerna = function () {
+    originalEventosPagina();
+    document.querySelectorAll("[data-teste-partida]").forEach(btn => {
+      btn.onclick = () => {
+        this._resultadoSelecionadoTeste = null;
+        this._partidaSelecionadaTeste = btn.dataset.testePartida;
+        this._renderModerno();
+      };
+    });
+    document.querySelectorAll("[data-teste-resultado]").forEach(btn => {
+      btn.onclick = () => {
+        this._resultadoSelecionadoTeste = btn.dataset.testeResultado;
+        this._renderModerno();
+      };
+    });
+    const save = document.getElementById("teste-proximas-save");
+    if (save && typeof TesteProximasPartidas !== "undefined") {
+      save.onclick = () => {
+        const path = document.getElementById("teste-proximas-path")?.value || "proximas_partidas";
+        TesteProximasPartidas.salvarCaminho(path);
+        TesteProximasPartidas.iniciar();
+        this._renderModerno();
+      };
+    }
+  };
+
+  Interface._estilosModernos = function () {
+    originalEstilos();
+    if (document.getElementById("teste-entradas-css")) return;
+    const st = document.createElement("style");
+    st.id = "teste-entradas-css";
+    st.textContent = `
+      .teste-entradas-grid{display:grid;grid-template-columns:minmax(560px,1.06fr) minmax(500px,.94fr);gap:12px;align-items:start}
+      .teste-left-column{display:grid;gap:12px}.teste-panel{padding:0;overflow:hidden;border-radius:9px}.teste-panel-head{min-height:46px;display:flex;align-items:center;justify-content:space-between;padding:9px 14px;border-bottom:1px solid #152945;background:linear-gradient(180deg,#08152a,#06101f)}
+      .teste-panel-head h2{margin:0!important;font-size:14px!important}.teste-panel-head p{margin:2px 0 0;color:#8f9bb2;font-size:10px}.teste-panel-head>span{font-size:20px;color:#aab5c9}.teste-match-list{padding:6px}
+      .teste-match-row{width:100%;display:grid;grid-template-columns:88px 145px minmax(180px,1fr) 58px 14px;gap:8px;align-items:center;text-align:left;color:#edf2ff;background:#071326;border:1px solid #183154;border-radius:6px;padding:5px 8px;margin:4px 0;cursor:pointer;min-height:47px}
+      .teste-match-row:hover{border-color:#4e1e8f}.teste-match-row.selecionado{background:linear-gradient(90deg,#32105d,#101630);border:1px solid #b900ff;box-shadow:0 0 0 1px rgba(185,0,255,.15)}
+      .teste-row-time{display:flex;flex-direction:column;gap:1px}.teste-row-time span{font-size:8px;font-weight:800;color:#69b8ff;background:#063e75;border-radius:2px;padding:2px 4px;width:max-content}.teste-match-row.selecionado .teste-row-time span{background:#8300cb;color:#fff}.teste-row-time b{font-size:15px}
+      .teste-league{display:flex;gap:6px;align-items:center;min-width:0}.teste-league i{font-style:normal;color:#ff00f5}.teste-league small{font-size:9px;color:#bec7d8;line-height:1.1}.teste-teams-line{font-size:11px;font-weight:700;display:flex;align-items:center;gap:7px;min-width:0;overflow:hidden}.teste-team-inline{display:inline-flex;align-items:center;gap:5px;min-width:0}.teste-team-inline strong{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:125px}.teste-x{margin:0 3px;color:#92a2ba;flex:0 0 auto}.teste-await-inline{font-weight:600;color:#9a84b8}
+      .teste-count{height:38px;border:1px solid #1b3d66;background:#082247;border-radius:6px;display:flex;flex-direction:column;align-items:center;justify-content:center}.teste-count b{font-size:17px;color:#b9ceff}.teste-count small{font-size:8px;color:#7ca6d7}.teste-chevron{font-size:20px;color:#8cb6ef}
+      .teste-last-panel{min-height:165px}.teste-result-row{grid-template-columns:88px 145px minmax(250px,1fr) 82px;cursor:pointer}.teste-result-row:hover{border-color:#7d2fc4}.teste-result-row .teste-row-time span{background:#063e75;color:#69b8ff}.teste-result-match{display:flex;align-items:center;justify-content:center;gap:8px;min-width:0;overflow:hidden}.teste-result-score{font-size:13px;color:#fff;white-space:nowrap;padding:3px 7px;border-radius:4px;background:#0a1d35;border:1px solid #1a3a61}.teste-result-await{font-size:9px;color:#8f9bb2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.teste-status{font-style:normal;font-size:9px;padding:5px;border-radius:4px;text-align:center}.teste-status.green{color:#23ef9b;background:#064f38;border:1px solid #078b5d}.teste-status.red{color:#ff6575;background:#53101c;border:1px solid #8e1c2c}.teste-status.neutro{color:#91a8c7;background:#0c223c;border:1px solid #244769}
+      .teste-details{padding:10px;min-height:535px}.teste-detail-head{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #142842;padding:0 0 8px}.teste-detail-head h2{margin:0!important;font-size:13px!important}.teste-detail-head span{font-size:8px;padding:4px 7px;border-radius:3px;background:#5d157a;color:#f5c8ff}.teste-league-title{text-align:center;color:#a8b4c9;font-size:9px;padding:8px 0 3px}
+      .teste-match-hero{display:grid;grid-template-columns:1fr 110px 1fr;align-items:center;gap:8px;padding:2px 0 9px}.teste-team{display:flex;flex-direction:column;align-items:center;gap:4px;text-align:center}.teste-team.teste-team-side{flex-direction:row;justify-content:center;gap:8px}.teste-team b{font-size:11px;max-width:140px;overflow-wrap:anywhere}.teste-team-logo{width:42px;height:42px;object-fit:contain;flex:0 0 auto}.teste-team-logo.mini{width:20px;height:20px}.teste-team-missing{display:inline-grid;place-items:center;border-radius:50%;border:1px solid #28415f;background:#0a1728;color:#91a8c7;font-size:8px;font-weight:800}.teste-kickoff{text-align:center;display:flex;flex-direction:column;align-items:center}.teste-kickoff b{font-size:22px}.teste-kickoff small{font-size:8px;color:#8fa0bc}.teste-kickoff span{font-size:11px;color:#6d7e9b;margin-top:2px}
+      .teste-best-market{display:grid;grid-template-columns:1fr 155px;gap:10px;border:1px solid #0d4a39;background:linear-gradient(90deg,#042d24,#071929);border-radius:6px;padding:8px 10px}.teste-best-title{display:flex;gap:10px;align-items:center}.teste-best-title>span{font-size:25px;color:#00df94}.teste-best-title small{display:block;color:#aab8ca;font-size:8px}.teste-best-title b{display:block;font-size:15px;margin-top:2px}.teste-best-title p{margin:2px 0 0;color:#9ab1b8;font-size:8px}.teste-best-metrics{display:grid;grid-template-columns:1fr;align-items:center}.teste-best-metrics div{text-align:center;border-left:1px solid #14523f}.teste-best-metrics small{display:block;font-size:7px;color:#93a5b8}.teste-best-metrics b{font-size:16px}
+      .teste-under35-fixo{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center;margin-top:8px;padding:8px 10px;border:1px solid #24445f;border-radius:6px;background:#071829}.teste-under35-fixo.ativo{border-color:#0b7652;background:#05261f}.teste-under35-fixo>div:first-child{min-width:0}.teste-under35-fixo small{display:block;font-size:7px;color:#8fa6be}.teste-under35-fixo b{display:block;font-size:12px;margin-top:2px}.teste-under35-fixo p{margin:2px 0 0;font-size:8px;color:#8fa6be}.teste-under35-status{text-align:right;min-width:72px}.teste-under35-status span{display:block;font-size:7px;color:#7eb6e8}.teste-under35-fixo.ativo .teste-under35-status span{color:#58e6ad}.teste-under35-status b{font-size:13px}.teste-section-title{font-size:9px;font-weight:800;margin:9px 0 4px;color:#cbd5e6}.teste-suggestion-list{border-top:1px solid #14253c}.teste-suggestion-row{display:grid;grid-template-columns:26px minmax(220px,1fr) 70px 108px;gap:7px;align-items:center;padding:7px 5px;border-bottom:1px solid #14253c}.teste-suggestion-number{width:20px;height:20px;border-radius:50%;display:grid;place-items:center;background:#0d2749;color:#c3d8ff;font-size:9px}.teste-suggestion-row>div:nth-child(2){display:flex;flex-direction:column}.teste-suggestion-row>div:nth-child(2) b{font-size:10px}.teste-suggestion-row>div:nth-child(2) small{font-size:8px;color:#8293ae}.teste-conf{text-align:center}.teste-conf small{display:block;font-size:6px;color:#7f90aa}.teste-conf b{font-size:11px}.teste-suggestion-row em{font-style:normal;font-size:7px;text-align:center;padding:4px;border-radius:3px}.teste-suggestion-row em.principal{color:#63ffbc;background:#064f38;border:1px solid #0c865e}.teste-suggestion-row em.alternativa{color:#72bcff;background:#082d52;border:1px solid #0c5793}
+      .teste-analysis{border:1px solid #8422bd;background:linear-gradient(90deg,#22083b,#10091f);border-radius:6px;padding:8px 10px;margin-top:8px}.teste-analysis b{font-size:9px;color:#fb3cff}.teste-analysis p{font-size:9px;line-height:1.45;color:#c7b9da;margin:4px 0 0}.teste-bottom-details{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:8px}.teste-bottom-details>div{border:1px solid #172943;border-radius:6px;padding:7px}.teste-bottom-details h3{font-size:8px;margin:0 0 6px}.teste-recent-scores{display:flex;gap:4px;flex-wrap:wrap}.teste-score-chip{font-size:9px;font-weight:800;padding:5px 8px;border-radius:4px;background:#0b3d28;color:#70ff9d;border:1px solid #155c3c}.teste-bottom-form .teste-h2h-box{grid-column:1/-1}.teste-form-head{display:grid;grid-template-columns:1fr auto;gap:2px 8px;align-items:center;margin-bottom:5px}.teste-form-head h3{grid-column:1/-1;margin-bottom:2px!important}.teste-form-head b{font-size:9px;color:#e7effc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.teste-form-head span{font-size:7px;font-weight:900;color:#8da2bb;border:1px solid #223752;border-radius:999px;padding:2px 5px}.teste-form-list{display:grid;gap:2px}.teste-form-row{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);align-items:center;gap:6px;padding:5px 1px;border-bottom:1px solid #14243a}.teste-form-row:last-child{border-bottom:0}.teste-form-time{font-size:7px;font-weight:700;color:#aebed1;white-space:normal;line-height:1.2}.teste-form-time.casa{text-align:right}.teste-form-time.fora{text-align:left}.teste-form-time.alvo{color:#eef7ff;font-weight:900}.teste-form-score{min-width:38px;text-align:center;font-size:8px;color:#78f6ac}.teste-form-row small{grid-column:1/-1;text-align:center;color:#60758e;font-size:6px;margin-top:-2px}.teste-form-empty{font-size:7px;color:#8e7aa9;padding:6px 1px;line-height:1.35}.teste-h2h{display:grid;gap:3px}.teste-h2h-row{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);align-items:center;gap:7px;font-size:8px;padding:6px 2px;border-bottom:1px solid #172943}.teste-h2h-row .teste-h2h-time{font-weight:800;color:#d7e5f7;white-space:normal}.teste-h2h-row .teste-h2h-time.casa{text-align:right}.teste-h2h-row .teste-h2h-time.fora{text-align:left}.teste-h2h-row .teste-h2h-score{min-width:42px;text-align:center;color:#78f6ac;font-size:9px}.teste-h2h-row small{grid-column:1/-1;text-align:center;color:#647991;font-size:6px;margin-top:-2px}.teste-h2h-row.vazio{grid-template-columns:1fr;color:#8e7aa9}.teste-h2h-row.vazio span{text-align:left}.teste-empty{text-align:center;color:#8f7aa9;padding:14px}
+      .teste-no-upcoming,.teste-no-selection{min-height:120px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:5px;text-align:center;color:#b9c7da;padding:22px}.teste-no-upcoming b,.teste-no-selection b{font-size:14px;color:#d8e4f5}.teste-no-upcoming small,.teste-no-selection small{font-size:9px;color:#7f91aa}.teste-details-empty{min-height:300px}
+      .teste-firebase-setting input{background:#061326;color:white;border:1px solid #16528c;border-radius:5px;padding:7px;min-width:260px}.teste-url-readonly{font-size:9px;max-width:360px;overflow-wrap:anywhere;text-align:right}.teste-fb-status{display:block;padding:8px;color:#9eb0c7}.teste-fb-status.online{color:#24e999}.teste-fb-status.erro{color:#ff6371}
+      .teste-h2h-progresso{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:5px 7px;margin-bottom:5px;border:1px solid #27405c;border-radius:6px;background:#07101e}.teste-h2h-progresso b{color:#c9f7e3;font-size:11px}.teste-h2h-progresso span{font-size:8px;color:#8ea5bd;text-transform:uppercase;letter-spacing:.4px}
+      @media(max-width:1180px){.teste-entradas-grid{grid-template-columns:1fr}.teste-details{min-height:auto}.teste-match-row{grid-template-columns:86px 135px minmax(160px,1fr) 56px 12px}.teste-result-row{grid-template-columns:86px 135px minmax(250px,1fr) 82px}}
+      @media(max-width:760px){.teste-match-row{grid-template-columns:72px 1fr 48px 12px}.teste-league{display:none}.teste-teams-line{font-size:10px}.teste-team-inline strong{max-width:80px}.teste-count{height:34px}.teste-match-hero{grid-template-columns:1fr 82px 1fr}.teste-team.teste-team-side{flex-direction:column;gap:4px}.teste-best-market{grid-template-columns:1fr}.teste-best-metrics{border-top:1px solid #14523f;padding-top:6px}.teste-best-metrics div:first-child{border-left:0}.teste-suggestion-row{grid-template-columns:24px 1fr 48px}.teste-suggestion-row em{grid-column:2/-1}.teste-bottom-details{grid-template-columns:1fr}.teste-result-row{grid-template-columns:72px 1fr 72px}.teste-result-row .teste-league{display:none}.teste-result-match{justify-content:flex-start}.teste-result-score{font-size:11px;padding:2px 5px}}
+    `;
+    document.head.appendChild(st);
+  };
+
+  window.addEventListener("vai-na-fe:proximas-partidas-atualizada", () => {
+    // Uma mudança na agenda pode fazer a próxima partida virar a PARTIDA ATUAL.
+    // Só nesse instante tentamos salvar as sugestões oficiais. Jogos futuros
+    // continuam sendo prévias e não são gravados.
+    if (typeof Interface !== "undefined" && typeof Interface._garantirSugestaoOficialAtualTeste === "function") {
+      try { Interface._garantirSugestaoOficialAtualTeste(); } catch (_) {}
+    }
+    if (typeof Interface !== "undefined" && Interface._paginaModerna === "entradas") Interface._renderModerno();
+    if (typeof Interface !== "undefined" && Interface._paginaModerna === "configuracoes") Interface._renderModerno();
+  });
+})();
+"use strict";
+
+document.addEventListener("DOMContentLoaded", () => {
+  const app = document.getElementById("app");
+  // Entrega o primeiro frame ao Safari antes de iniciar leituras e cálculos.
+  setTimeout(() => {
+  try {
+    if (
+      typeof Historico === "undefined" ||
+      typeof Interface === "undefined" ||
+      typeof MemoriaConsolidada === "undefined"
+    ) {
+      throw new Error("Modulos principais ou memoria consolidada nao encontrados.");
+    }
+
+    const baseMemoria = MemoriaConsolidada.criarBase();
+    Historico.iniciar();
+    Historico.carregarDados(baseMemoria, false, { baseQuantidade: baseMemoria.length });
+    Historico.definirBaseEstudo(baseMemoria.length);
+
+    if (typeof Aprendizado !== "undefined") {
+      Aprendizado.iniciar(MemoriaConsolidada.aprendizadoInicial);
+    }
+
+    // Carrega o histórico real já salvo no aparelho. Isso é apenas cache de tela;
+    // a partida atual só vira OFICIAL depois que a carga remota completa terminar.
+    const salvos = typeof Armazenamento !== "undefined" ? Armazenamento.obterDados() : [];
+    const locaisRecentes = (Array.isArray(salvos) ? salvos : [])
+      .filter(item =>
+        item && typeof item === "object" && item.fonte === "ao-vivo" && item.placar &&
+        item._temporal?.data && item._temporal?.horario && item.mandante && item.visitante
+      )
+      .sort((a,b) => `${a._temporal.data}|${a._temporal.horario}`.localeCompare(`${b._temporal.data}|${b._temporal.horario}`))
+      .slice(-500);
+    if (locaisRecentes.length) Historico.importarResultadosAoVivo(locaisRecentes, false);
+
+    Historico.definirBaseEstudo(baseMemoria.length);
+    Historico.persistir();
+
+    // IMPORTANTE: nunca reconstruímos centenas de previsões históricas na thread
+    // principal durante a abertura. Esse replay era o principal responsável pelos
+    // congelamentos longos no Safari/iPhone. A memória V4 vem pronta do Firebase/
+    // localStorage; resultados NOVOS são aprendidos um por vez depois, sem backlog.
+    const agendarAprendizadoRecente = (quantidadeNova = 1) => {
+      if (typeof Aprendizado === "undefined" || !Aprendizado.aprenderIndice) return;
+      if (Aprendizado._aprendendoRecente) return;
+      const resultados = Historico.obterTodos();
+      const limite = Math.max(1, Math.min(3, Number(quantidadeNova) || 1));
+      const indices = [];
+      for (let i = resultados.length - 1; i > 0 && indices.length < limite; i--) {
+        const chave = Aprendizado._chaveResultado?.(resultados[i]);
+        if (chave && !Aprendizado._processados?.has(chave)) indices.unshift(i);
+      }
+      if (!indices.length) return;
+
+      Aprendizado._aprendendoRecente = true;
+      let pos = 0;
+      const concluir = () => {
+        Aprendizado._aprendendoRecente = false;
+        try { Aprendizado._salvarLocal?.(); } catch (_) {}
+        try {
+          if (typeof Sincronizacao !== "undefined" && Sincronizacao.publicarMemoriaAprendizado) {
+            Sincronizacao.publicarMemoriaAprendizado(Aprendizado.exportar());
+          }
+        } catch (_) {}
+        if (typeof Interface !== "undefined") Interface.atualizar();
+      };
+      const passo = () => {
+        if (pos >= indices.length) return concluir();
+        try {
+          Aprendizado.aprenderIndice(resultados, indices[pos], { persistir:false });
+        } catch (e) {
+          console.warn("Falha ao aprender resultado recente:", e);
+        }
+        pos++;
+        if (pos < indices.length) setTimeout(passo, 700);
+        else concluir();
+      };
+      // Dá prioridade à interação e à pintura da tela; aprende depois.
+      setTimeout(passo, 1200);
+    };
+
+    window.__VAI_NA_FE_BASE_PRONTA__ = false;
+    Interface.iniciar();
+    console.log("Painel aberto com", Historico.obterQuantidadeComHorario(), "resultado(s) em cache.");
+
+    if (typeof Sincronizacao !== "undefined" && Sincronizacao.configurada()) {
+      Sincronizacao.observar(lista => {
+        const adicionados = Historico.importarResultadosAoVivo(lista, true);
+        const timesEnriquecidos = Number(Historico._ultimoEnriquecimentoTimes || 0);
+        if (adicionados) agendarAprendizadoRecente(adicionados);
+        if ((adicionados || timesEnriquecidos) && typeof Interface !== "undefined") {
+          Interface.atualizar();
+        }
+      });
+
+      (async () => {
+        try {
+          await Sincronizacao.limparMemoriasAntigasRemotasUmaVez();
+
+          // Usa a memória individual pronta. Se a rede falhar, mantém a cópia local;
+          // em hipótese nenhuma faz replay de centenas de jogos na abertura.
+          try {
+            const remota = await Sincronizacao.obterMemoriaAprendizado();
+            if (remota && typeof Aprendizado !== "undefined") Aprendizado.importar(remota);
+          } catch (_) {}
+
+          const listaCompleta = await Sincronizacao.obterHistoricoCompleto();
+          Historico.importarResultadosAoVivo(listaCompleta || [], true);
+          window.__VAI_NA_FE_BASE_PRONTA__ = true;
+          if (typeof Interface !== "undefined") Interface.atualizar();
+          Sincronizacao.iniciar();
+        } catch (e) {
+          console.warn("Historico completo indisponivel; usando cache local:", e);
+          window.__VAI_NA_FE_BASE_PRONTA__ = true;
+          if (typeof Interface !== "undefined") Interface.atualizar();
+          Sincronizacao.iniciar();
+        }
+      })();
+    } else {
+      window.__VAI_NA_FE_BASE_PRONTA__ = true;
+      if (typeof Interface !== "undefined") Interface.atualizar();
+    }
+
+    // Compatibilidade com o registro antigo; não recalcula mercados aqui.
+    if (
+      typeof PalpitesRegistrados !== "undefined" &&
+      typeof RelogioPartidas !== "undefined"
+    ) {
+      const atual = RelogioPartidas.partidaAtual();
+      const temResultado = Historico.temResultadoNoHorario(atual);
+      const temPalpite = PalpitesRegistrados.obterParaPartida(atual);
+      const ultimoPalpite = PalpitesRegistrados.obterUltimo();
+      if (!temResultado && !temPalpite && ultimoPalpite?.palpites) {
+        PalpitesRegistrados.registrarParaPartida(atual, ultimoPalpite.palpites, "reabertura-app");
+      }
+    }
+  } catch (erro) {
+    console.error("Erro ao iniciar o aplicativo:", erro);
+    if (app) {
+      app.innerHTML = `<div style="max-width:720px;margin:30px auto;padding:18px;border:1px solid #e6b8b8;background:#fff5f5;font-family:Arial,sans-serif"><h2 style="margin-top:0;color:#9b1c1c">Nao foi possivel abrir o painel</h2><p>Atualize a pagina. Se continuar, publique novamente todos os arquivos desta versao.</p><small>${String(erro?.message || erro)}</small></div>`;
+    }
+  }
+  }, 0);
+});
