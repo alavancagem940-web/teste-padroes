@@ -256,10 +256,22 @@ const Historico = {
 
     importarResultadosAoVivo(lista, salvar = true) {
         if (!Array.isArray(lista)) return 0;
+
+        // IMPORTAÇÃO EM LOTE: na V22 cada resultado chamava adicionar(), que
+        // reordenava todo o histórico a cada item. Com centenas de resultados
+        // isso virava O(n²) e travava principalmente no celular. Aqui montamos
+        // um índice uma vez, absorvemos tudo e ordenamos/persistimos só no fim.
+        const existentes = new Map();
+        for (const atual of this.resultados) {
+            const chave = this._ehAoVivo(atual) ? this._chaveTemporal(atual) : null;
+            if (chave) existentes.set(chave, atual);
+        }
+
         let adicionados = 0, enriquecidos = 0;
         for (const item of lista) {
             const r = item && typeof item === "object" ? item : null;
             if (!r?.placar || r?.fonte !== "ao-vivo" || !r?._temporal?.data || !r?._temporal?.horario || !r?.mandante || !r?.visitante) continue;
+
             const metaTemporal = {
                 data: r._temporal.data,
                 horario: r._temporal.horario,
@@ -268,38 +280,46 @@ const Historico = {
                 slot3: r._temporal.slot3,
                 timeZone: r._temporal.timeZone || "Europe/London"
             };
-            const resultado = this.adicionar(r.placar, false, {
+            const chave = `${metaTemporal.data}|${metaTemporal.horario}`;
+            const existente = existentes.get(chave);
+
+            if (existente) {
+                if (this._aplicarTimesResultado(existente, r)) enriquecidos++;
+                continue;
+            }
+
+            const resultado = this.criarResultado(r.placar, {
                 ...metaTemporal,
                 __fonte: "ao-vivo",
                 __remoto: true,
                 __dataCriacao: r.data || null
             });
-            if (resultado && !resultado.duplicado) {
-                if (this._aplicarTimesResultado(resultado, r)) enriquecidos++;
-                adicionados++;
-            } else if (resultado?.duplicado) {
-                // Se o placar já estava no cache sem os nomes, aproveita uma
-                // nova leitura do Firebase para completar a mesma partida.
-                const existente = this.obterResultadoNoHorario(metaTemporal);
-                if (this._aplicarTimesResultado(existente, r)) enriquecidos++;
-            }
+            resultado.fonte = "ao-vivo";
+            this._aplicarTimesResultado(resultado, r);
+            this.resultados.push(resultado);
+            this.sequenciaAtual.push(resultado);
+            existentes.set(chave, resultado);
+            this.horariosSemDados = this.horariosSemDados.filter(x => x !== chave);
+            this.horariosSemDadosSessao = this.horariosSemDadosSessao.filter(x => x !== chave);
+            adicionados++;
         }
+
         this._ultimoEnriquecimentoTimes = enriquecidos;
-        if (salvar && (adicionados || enriquecidos)) {
+        if (adicionados || enriquecidos) {
             this._sincronizarOrdemAtual();
-            this.persistir();
+            if (salvar) this.persistir();
         }
         return adicionados;
     },
 
     persistir() {
         if (typeof Armazenamento === "undefined") return false;
-        // A base treinada ja vive em MemoriaConsolidada. O navegador guarda
-        // somente os resultados reais recentes usados na tela; assim o cache
-        // nunca volta a virar uma copia completa do banco de treinamento.
+        // Guarda uma janela ampla do histórico real para a interface nascer
+        // com contexto suficiente (casa/fora/H2H) sem depender da primeira
+        // resposta de rede. Continua limitado para não crescer indefinidamente.
         const recentes = this.resultados
             .filter(r => this._ehAoVivo(r) && this._chaveTemporal(r))
-            .slice(-20)
+            .slice(-500)
             .map(r => ({
                 placar: r.placar,
                 _temporal: r._temporal,

@@ -24,8 +24,8 @@ document.addEventListener("DOMContentLoaded", () => {
       Aprendizado.iniciar(MemoriaConsolidada.aprendizadoInicial);
     }
 
-    // O cache local guarda somente resultados reais. Carregamos no maximo os
-    // 10 recentes para a tela nascer preenchida sem reconstruir o historico.
+    // O cache local guarda até 500 resultados reais. Assim a tela já nasce com
+    // contexto suficiente para últimos jogos/H2H enquanto o Firebase sincroniza.
     const salvos = typeof Armazenamento !== "undefined"
       ? Armazenamento.obterDados()
       : [];
@@ -45,7 +45,7 @@ document.addEventListener("DOMContentLoaded", () => {
           `${b._temporal.data}|${b._temporal.horario}`
         )
       )
-      .slice(-20);
+      .slice(-500);
     if (locaisRecentes.length) {
       Historico.importarResultadosAoVivo(locaisRecentes, false);
     }
@@ -53,7 +53,9 @@ document.addEventListener("DOMContentLoaded", () => {
     Historico.definirBaseEstudo(baseMemoria.length);
     Historico.persistir();
 
-    // A tela abre ANTES de qualquer consulta remota.
+    // A tela abre ANTES de qualquer consulta remota, mas sugestões OFICIAIS só
+    // podem ser salvas quando a base disponível terminar de carregar/aprender.
+    window.__VAI_NA_FE_BASE_PRONTA__ = false;
     Interface.iniciar();
     console.log(
       "Painel aberto com base zerada e",
@@ -62,15 +64,37 @@ document.addEventListener("DOMContentLoaded", () => {
     );
 
     if (typeof Sincronizacao !== "undefined" && Sincronizacao.configurada()) {
+      let repetirAprendizadoNovo = false;
+      const concluirAprendizadoNovo = () => {
+        if (repetirAprendizadoNovo && typeof Aprendizado !== "undefined") {
+          repetirAprendizadoNovo = false;
+          const reiniciou = Aprendizado.aprenderPendentes(Historico.obterTodos(), concluirAprendizadoNovo);
+          if (reiniciou) return;
+        }
+        window.__VAI_NA_FE_BASE_PRONTA__ = true;
+        if (typeof Interface !== "undefined") Interface.atualizar();
+      };
+
       Sincronizacao.observar(lista => {
         const adicionados = Historico.importarResultadosAoVivo(lista, true);
         const timesEnriquecidos = Number(Historico._ultimoEnriquecimentoTimes || 0);
         if (adicionados && typeof Aprendizado !== "undefined") {
-          Aprendizado.aprenderPendentes(Historico.obterTodos());
+          // O resultado novo já pode atualizar as PRÉVIAS, mas a próxima partida
+          // só vira OFICIAL depois que esse resultado também entrar na memória
+          // individual dos mercados. Assim a sugestão oficial nasce com todo o
+          // contexto disponível naquele instante.
+          window.__VAI_NA_FE_BASE_PRONTA__ = false;
+          const iniciou = Aprendizado.aprenderPendentes(Historico.obterTodos(), concluirAprendizadoNovo);
+          if (!iniciou) {
+            if (Aprendizado._aprendendo) repetirAprendizadoNovo = true;
+            else window.__VAI_NA_FE_BASE_PRONTA__ = true;
+          }
         }
         // Mesmo quando o placar já estava no cache local, uma leitura nova do
         // Firebase pode completar mandante/visitante. Nesse caso a interface
         // também precisa redesenhar a linha sem contar um novo resultado.
+        // Se o aprendizado ainda estiver rodando, a página pode mostrar prévia,
+        // mas a gravação OFICIAL permanece bloqueada até o callback acima.
         if ((adicionados || timesEnriquecidos) && typeof Interface !== "undefined") {
           Interface.atualizar();
         }
@@ -93,6 +117,7 @@ document.addEventListener("DOMContentLoaded", () => {
           Historico.importarResultadosAoVivo(listaCompleta || [], true);
 
           const finalizar = () => {
+            window.__VAI_NA_FE_BASE_PRONTA__ = true;
             if (typeof Interface !== "undefined") Interface.atualizar();
             Sincronizacao.iniciar();
           };
@@ -104,9 +129,16 @@ document.addEventListener("DOMContentLoaded", () => {
           }
         } catch (e) {
           console.warn("Base limpa completa indisponivel:", e);
+          // Em falha de rede, usa o cache local amplo já carregado. Não deixa a
+          // partida atual sem possibilidade de registrar sua sugestão oficial.
+          window.__VAI_NA_FE_BASE_PRONTA__ = true;
+          if (typeof Interface !== "undefined") Interface.atualizar();
           Sincronizacao.iniciar();
         }
       })();
+    } else {
+      window.__VAI_NA_FE_BASE_PRONTA__ = true;
+      if (typeof Interface !== "undefined") Interface.atualizar();
     }
 
     // Mantem o palpite da partida atual quando o navegador e reaberto.

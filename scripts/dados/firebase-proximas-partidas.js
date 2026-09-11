@@ -255,6 +255,17 @@ const TesteProximasPartidas = {
 
     visitar(bruto);
 
+    // Calcula a assinatura ANTES de tocar no localStorage. O polling é frequente,
+    // mas se o Firebase devolveu exatamente a mesma agenda não há motivo para
+    // serializar/escrever caches de novo nem pressionar a renderização/escudos.
+    const assinaturaNova = JSON.stringify([...novo.entries()].map(([chave, p]) => [
+      chave, p.ordem, p.status, p.liga, p.mandante, p.visitante,
+      p.escudoMandante, p.escudoVisitante,
+      p.analise, p.sugestoes, p.confrontoDireto
+    ]));
+    const mudou = assinaturaNova !== this._assinaturaDados;
+    this._assinaturaDados = assinaturaNova;
+
     // O Firebase do coletor já informa qual é a partida ATUAL e a ordem das
     // próximas. Não usamos mais o relógio/resultados do site para decidir qual
     // linha deve aparecer. Isso impede a agenda de "parar" quando passa um
@@ -264,6 +275,7 @@ const TesteProximasPartidas = {
     // Erro de rede não passa por _absorver(), então não confundimos "vazio" com falha.
     this._partidasRemotas = novo;
     this._ultimaAtualizacaoRemota = Date.now();
+    if (!mudou) return false;
 
     // Mantém uma memória local da agenda vista pelo coletor. Uma resposta vazia
     // ou momentaneamente incompleta nunca apaga partidas já conhecidas.
@@ -296,14 +308,7 @@ const TesteProximasPartidas = {
       localStorage.setItem(chaveCache, JSON.stringify(Object.fromEntries(entradas)));
     } catch (_) {}
 
-    const assinaturaNova = JSON.stringify([...novo.entries()].map(([chave, p]) => [
-      chave, p.ordem, p.status, p.liga, p.mandante, p.visitante,
-      p.escudoMandante, p.escudoVisitante,
-      p.analise, p.sugestoes, p.confrontoDireto
-    ]));
-    const mudou = assinaturaNova !== this._assinaturaDados;
-    this._assinaturaDados = assinaturaNova;
-    return mudou;
+    return true;
   },
 
   _statusFinal(status) {

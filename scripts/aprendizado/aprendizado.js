@@ -280,7 +280,14 @@ const Aprendizado = {
     const resumoTrabalho = this._clonarResumo(this._resumo);
     const processadosTrabalho = new Set(this._processados);
     let pos = 0;
-    const LOTE = 24;
+    const LOTE_MAX = 3;
+    const agendar = fn => {
+      if (typeof requestIdleCallback === "function") {
+        requestIdleCallback(fn, { timeout: 120 });
+      } else {
+        setTimeout(() => fn(null), 16);
+      }
+    };
 
     const concluir = () => {
       this._resumo = resumoTrabalho;
@@ -293,24 +300,27 @@ const Aprendizado = {
       if (typeof aoConcluir === "function") { try { aoConcluir(); } catch (_) {} }
     };
 
-    const proximo = () => {
-      const fim = Math.min(indices.length, pos + LOTE);
+    const proximo = deadline => {
+      let feitos = 0;
       try {
-        for (; pos < fim; pos++) {
+        while (pos < indices.length && feitos < LOTE_MAX) {
           this.aprenderIndice(resultados, indices[pos], {
             resumo: resumoTrabalho,
             processados: processadosTrabalho,
             persistir: false
           });
+          pos++;
+          feitos++;
+          if (deadline && typeof deadline.timeRemaining === "function" && !deadline.didTimeout && feitos >= 1 && deadline.timeRemaining() < 4) break;
         }
       } catch (e) {
         console.warn("Falha ao aprender lote de resultados:", e);
       }
-      if (pos < indices.length) setTimeout(proximo, 0);
+      if (pos < indices.length) agendar(proximo);
       else concluir();
     };
 
-    setTimeout(proximo, 0);
+    agendar(proximo);
     return true;
   }
 };

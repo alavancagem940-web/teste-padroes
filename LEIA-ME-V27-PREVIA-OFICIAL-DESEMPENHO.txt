@@ -1,0 +1,36 @@
+VAI NA FÉ — V27 — PRÉVIA DINÂMICA + SUGESTÃO OFICIAL + DESEMPENHO
+
+BASE
+- Esta versão foi refeita a partir da V22, tratada como última base funcional.
+- V23 e V24 não foram usadas como base.
+- Somente correções aprovadas foram reaplicadas sobre a V22.
+
+REGRA DAS 3 SUGESTÕES
+- Jogos que ainda estão 1, 2, 3, 4 ou 5 posições à frente mostram PRÉVIA DINÂMICA.
+- A prévia NÃO é salva como sugestão oficial.
+- Ela pode mudar de mercado, lado, força ou confiança quando entram novos resultados.
+- Quando a partida vira a PRIMEIRA/ATUAL da fila, as 3 sugestões daquele instante são salvas como OFICIAIS.
+- Uma sugestão oficial é salva apenas uma vez e nunca é sobrescrita.
+- Quando o placar final chega, GREEN/RED é calculado usando exatamente os mercados/lados oficiais salvos.
+- O sistema não recalcula nem cria sugestão retroativa para uma partida já finalizada.
+
+U3.5
+- Continua em posição fixa e separada das 3 sugestões.
+- O3.5 continua podendo disputar normalmente uma das 3 sugestões.
+- O0.5 continua fora das sugestões.
+
+ANÁLISE DA IA
+- Mantém leitura contextual do confronto: mandante em casa, visitante fora, gols marcados/sofridos,
+  forma, perfil de gols, Ambos Marcam, H2H e sinal principal.
+
+DESEMPENHO / CELULAR
+- Importação do histórico foi transformada em lote: centenas de resultados são absorvidos e ordenados uma vez.
+- Cache local guarda até 500 resultados reais para a tela nascer com contexto sem esperar a rede.
+- Aprendizado de resultados pendentes roda em pequenos lotes durante períodos ociosos do navegador.
+- Polling das próximas partidas não regrava localStorage quando a agenda não mudou.
+- A página Entradas evita recálculos/renderizações quando não houve mudança relevante.
+- Só a partida selecionada é analisada para prévia; as demais não são recalculadas apenas para preencher contador.
+
+MEMÓRIA
+- Histórico e memória de aprendizado existentes não são apagados.
+- A trilha de sugestões oficiais da V27 usa uma chave própria para não misturar registros antigos que podiam mudar após o resultado.
